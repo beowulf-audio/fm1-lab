@@ -60,7 +60,8 @@ if (cmd === "setup") {
   const st = setupStatus();
   console.log("");
   for (const [k, v] of Object.entries(st)) console.log(`  ${v.ok ? "ok     " : "missing"}  ${k.padEnd(10)} ${v.detail}${v.ok ? "" : `   (fm1-lab setup ${k}: ${COMPONENTS[k].time})`}`);
-  process.exitCode = Object.values(st).every((v) => v.ok) ? 0 : 1;
+  // the exit code is about what was asked for (`setup emu` on CI needs no toolchain), or everything when nothing was named
+  process.exitCode = Object.entries(st).filter(([k]) => !only || only.includes(k)).every(([, v]) => v.ok) ? 0 : 1;
 } else if (cmd === "new") {
   const dir = opt("--dir"), id = opt("--id"), author = opt("--author"), gitName = opt("--git-name"), gitEmail = opt("--git-email");
   const noBuild = flag("--no-build"), ghCredential = flag("--gh-credential");
