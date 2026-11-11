@@ -1,0 +1,13 @@
+diff --git a/llvm/lib/Target/PI32V2/MCTargetDesc/PI32V2AsmBackend.cpp b/llvm/lib/Target/PI32V2/MCTargetDesc/PI32V2AsmBackend.cpp
+index 9c6051dbe..e39a33476 100644
+--- a/llvm/lib/Target/PI32V2/MCTargetDesc/PI32V2AsmBackend.cpp
++++ b/llvm/lib/Target/PI32V2/MCTargetDesc/PI32V2AsmBackend.cpp
+@@ -161,7 +161,7 @@ MCFixupKindInfo PI32V2AsmBackend::getFixupKindInfo(MCFixupKind Kind) const {
+     return MCAsmBackend::getFixupKindInfo(Kind);
+   const PI32V2::PI32V2FixupLayout &L = PI32V2::fixupLayout(Kind);
+   // The bits are not contiguous; applyFixup places them.
+-  return {L.Name, 0, unsigned(L.InsnBytes) * 8, 0};
++  return {L.Name, 0, uint8_t(L.InsnBytes * 8), 0};
+ }
+ 
+ void PI32V2AsmBackend::applyFixup(const MCFragment &F, const MCFixup &Fixup,

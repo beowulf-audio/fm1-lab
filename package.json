@@ -1,0 +1,12 @@
+{
+  "name": "fm1-lab",
+  "private": true,
+  "description": "Headless test bench for M-VAVE FM-1 firmware, built on fm1-emu",
+  "type": "module",
+  "bin": { "fm1-lab": "bin/fm1-lab.mjs" },
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "test": "node --test tests/unit.test.mjs tests/sandbox.test.mjs",
+    "test:e2e": "node --test --test-concurrency=1 tests/e2e.test.mjs"
+  }
+}

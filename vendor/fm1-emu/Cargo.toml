@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/fm1-isa",
+    "crates/fm1-core",
+    "crates/fm1-soc",
+    "crates/fm1-gdbstub",
+    "crates/fm1-emu",
+    "crates/fm1-live",
+    "crates/fm1-web",
+]
+# the plugin is a workspace of its own (its GUI and plugin dependencies)
+exclude = ["crates/fm1-plugin"]
+
+[workspace.package]
+# the release's version (a tag v<version> releases it; crates/fm1-plugin keeps the same)
+version = "0.4.0"
+edition = "2021"
+license = "MIT"
+
+[profile.release]
+opt-level = 3
+lto = true

@@ -1,0 +1,1145 @@
+//! fm1-emu: run an FM-1 firmware image in the emulated SoC.
+//!
+//! Usage:
+//!   fm1-emu --bin app.bin [--flash decrypted.bin] [--entry 0x02000000] [--steps N] [--trace K] [--quiet]
+//!   fm1-emu ... --flaky-core1 1e-6 [--seed 7]   # core 1 misreads RAM now and then (fm1_soc::flaky)
+//!
+//! Loads the image at the XIP base (0x02000000), boots from `--entry` and
+//! reports: instructions retired, per-class histogram, unknown-class halts
+//! and the unknown-MMIO bring-up list.
+
+use std::collections::HashMap;
+use std::process::ExitCode;
+
+use fm1_core::{Bus, CoreError, Cpu};
+use fm1_soc::{Soc, XIP_BASE, RAM_BASE};
+
+mod buildinfo;
+
+const DEFAULT_RAM: usize = 1 * 1024 * 1024;
+/// RAM runs from RAM_BASE up to the XIP window: more would cover the code with RAM
+const MAX_RAM: usize = (XIP_BASE - RAM_BASE) as usize;
+
+const USAGE: &str = "usage: fm1-emu --bin APP.bin | --fwsc FIRMWARE.fwsc [options]
+run:   [--flash DECRYPTED.bin] [--raw-flash CHIP.bin] [--syx BANK.syx] [--entry 0x02000000]
+       [--steps N (5000000)] [--ms MS] [--ram BYTES (1048576, at most 4194304)] [--quiet]
+       [--flaky-core1 RATE [--seed N]] [--cpu1-survives (a fault on core 1 stops it alone; cpu0 goes on)]
+input: [--keys 'T[-T2]:PLAY,T:n7,T:k12,T:enc0:+3,T:pot:512,T:midi:903c64'] (times in ms;
+        the SMK-37's buttons by their printed names too: T:PATCH, T:SEQPLAY)
+out:   [--wav OUT.wav] [--snap MS,MS (work/lcd_MS.bmp)] [--dump ADDR N (N words at the end)]
+debug: [--trace K (the first K instructions)]
+       [--break-pc ADDR (registers at each hit)] [--watch ADDR (each change of a word)]
+tools: --list IMAGE START END | --describe OBJDUMP | --check-decode FILE | --sem-run FILE
+       | --exec-check OBJDUMP IMAGE | --coverage | --version | --help
+(addresses in hex)
+env:   FM1_BREAK_MAX=N (8)        stop reporting --break-pc after N hits
+       FM1_BREAK_PCS=ADDR,ADDR    more breakpoints
+       FM1_TRACE_RANGE=FROM:TO    trace every instruction from step FROM to TO
+       FM1_HIST_TOP=N (12)        lines of the class histogram
+       FM1_LIST_END=ADDR:LEN,...  list memory as it is after the run
+       FM1_IRQ_TRACE, FM1_DUAL_TRACE, FM1_FLASH_TRACE, FM1_LCD_TRACE, FM1_AUDIO_TRACE,
+       FM1_GPIO_TRACE, FM1_TRACE  logs
+       FM1_FWSC_XIP=FILE          save a package's XIP window; FM1_FWSC_DIR lists its directory
+       FM1_SUPERVISOR_START       start in supervisor mode (the old single stack)
+       FM1_NO_RAM_BLOCKS          RAM code a step at a time (the reference)
+       FM1_LCD_TIMED              the LCD's transfers take their time at the SPI clock, as on an FM-1
+                                  (also with FM1_STRICT; FM1_LCD_INSTANT turns it off; default: at once)
+a bare-metal program ends its run by jumping outside every code region (else it runs to --steps)";
+const DEFAULT_STEPS: u64 = 5_000_000;
+
+/// Flash offset of `app.bin` inside the JLFS app area. The XIP window maps flash 0x4000 at
+/// 0x02000000, so app.bin runs from 0x02000120 like Felucca's (2026-10-10: the earlier
+/// "flash - 0x4120" mapping put every absolute pointer 0x120 off: task entries, the cpu1
+/// stub at 0x020001B8 and the `.data` copy all landed mid-instruction). `--flash` maps the
+/// whole decrypted flash image from 0x4000 so reads past app.bin see what the hardware sees.
+const APP_FLASH_OFFSET: usize = 0x4120;
+use fm1_soc::XIP_FLASH_OFFSET;
+
+struct Args {
+    bin: String,
+    flash: Option<String>,
+    /// The flash as stored on the chip (app area encrypted): what SPI0 reads return. The XIP
+    /// window keeps the decrypted `--flash` image (the SFC decrypts on the fly).
+    raw_flash: Option<String>,
+    /// M-VAVE's stock firmware straight from its update package (.fwsc): XIP window, flash
+    /// chip and boot parameters from it (fm1_soc::stock_from_package)
+    fwsc: Option<String>,
+    /// a DX7 32-voice bank (.syx) for the stock firmware's patch slots 1-32
+    syx: Option<String>,
+    entry: u32,
+    steps: u64,
+    trace: Option<u64>,
+    quiet: bool,
+    ram: usize,
+    /// print every change of this RAM word (pc, old -> new)
+    watch: Option<u32>,
+    /// print the registers each time execution reaches this pc (first 8 hits)
+    break_pc: Option<u32>,
+    /// dump `n` words of memory at `addr` when the run ends
+    dump: Option<(u32, u32)>,
+    /// run for this many emulated milliseconds (240 MHz, 1 insn/cycle)
+    ms: Option<u64>,
+    /// write the I2S output (44.1 kHz stereo 16-bit) here
+    wav: Option<String>,
+    /// front-panel script: `t[-t2]:PLAY`, `t:n7`, `t:k12`, `t:enc0:+3`,
+    /// `t:SELECT:-1`, `t:pot:512`, `t:midi:903c64` (times in ms; a key without t2 is held 150 ms)
+    keys: Vec<String>,
+    /// save the LCD at these times (ms) as work/lcd_<ms>.bmp
+    snap: Vec<u64>,
+    /// a flaky core 1 (fm1_soc::flaky): the chance that one of its RAM loads misreads
+    flaky_core1: Option<f64>,
+    /// `--cpu1-survives`: a fault on core 1 stops that core alone, cpu0 goes on (`Soc::cpu1_survives`)
+    cpu1_survives: bool,
+    /// the flaky core's generator seed (the same seed, the same misreads; default 1)
+    seed: Option<u64>,
+}
+
+fn main() -> ExitCode {
+    if std::env::args().any(|a| a == "--version" || a == "-V") {
+        println!("{}", buildinfo::version("fm1-emu"));
+        if let Some(w) = buildinfo::stale() {
+            println!("warning: {w}");
+        }
+        return ExitCode::SUCCESS;
+    }
+    if std::env::args().any(|a| a == "--help" || a == "-h") {
+        println!("{USAGE}");
+        return ExitCode::SUCCESS;
+    }
+    if std::env::args().any(|a| a == "--coverage") {
+        return coverage_report();
+    }
+    // `--describe OBJDUMP`: for every instruction listed (address, then its bytes), the micro-op
+    // the emulator decodes it into (fm1_core::describe), as `addr|text` lines
+    if let Some(i) = std::env::args().position(|a| a == "--describe") {
+        let path = std::env::args().nth(i + 1).unwrap_or_default();
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            eprintln!("cannot read {path}");
+            return ExitCode::FAILURE;
+        };
+        for line in text.lines() {
+            let Some((addr, rest)) = line.trim_start().split_once(':') else { continue };
+            let Ok(pc) = u32::from_str_radix(addr.trim(), 16) else { continue };
+            let bytes: Vec<u8> = rest.split('\t').next().unwrap_or("").split_whitespace()
+                .map_while(|b| u8::from_str_radix(b, 16).ok()).collect();
+            if bytes.is_empty() {
+                continue;
+            }
+            let mut win = 0u64;
+            for (k, b) in bytes.iter().take(6).enumerate() {
+                win |= (*b as u64) << (8 * k);
+            }
+            if let Some(d) = fm1_core::describe(win, pc) {
+                println!("{pc:x}|{d}");
+            }
+        }
+        return ExitCode::SUCCESS;
+    }
+    // `--check-decode FILE`: for every line of hex bytes (an instruction, then what follows it),
+    // what the emulator makes of it: `line|len|class|status`, status `ok`, `unsupported` (decoded,
+    // no semantics), `undecoded` or the core's error, from one step on a scratch machine
+    // (tools/fuzz_decode.py feeds it instructions and compares with the vendor disassembler)
+    if let Some(i) = std::env::args().position(|a| a == "--check-decode") {
+        let path = std::env::args().nth(i + 1).unwrap_or_default();
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            eprintln!("cannot read {path}");
+            return ExitCode::FAILURE;
+        };
+        for (n, line) in text.lines().enumerate() {
+            let hex = line.trim();
+            let bytes: Vec<u8> = (0..hex.len() / 2).filter_map(|k| u8::from_str_radix(&hex[2 * k..2 * k + 2], 16).ok()).collect();
+            let mut win = 0u64;
+            for (k, b) in bytes.iter().take(8).enumerate() {
+                win |= (*b as u64) << (8 * k);
+            }
+            let Some((len, name)) = fm1_core::decode_info(win, XIP_BASE) else {
+                println!("{n}|0|-|undecoded");
+                continue;
+            };
+            let mut image = bytes.clone();
+            image.resize(64, 0);
+            let mut soc = Soc::new(64 * 1024, image);
+            let mut cpu = Cpu::new(XIP_BASE);
+            cpu.sp = RAM_BASE + 0x8000;
+            for r in cpu.regs.iter_mut() {
+                *r = RAM_BASE + 0x1000;
+            }
+            let status = match cpu.step(&mut soc) {
+                Ok(()) => "ok".to_string(),
+                Err(CoreError::Unsupported { .. }) | Err(CoreError::MissingSlot { .. }) => "unsupported".to_string(),
+                Err(e) => format!("{e:?}").replace('|', "/"),
+            };
+            println!("{n}|{len}|{name}|{status}");
+        }
+        return ExitCode::SUCCESS;
+    }
+    // `--sem-run FILE`: lines `HEX R0 .. R15 C` (an instruction, then the registers and the carry,
+    // hex): run the instruction once (a dual-issue head with a nop after it) and print
+    // `R0 .. R15 C` afterwards, or `err ...` (tools/sem_check.py compares this with the vendor
+    // disassembler's text)
+    if let Some(i) = std::env::args().position(|a| a == "--sem-run") {
+        let path = std::env::args().nth(i + 1).unwrap_or_default();
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            eprintln!("cannot read {path}");
+            return ExitCode::FAILURE;
+        };
+        for line in text.lines() {
+            let f: Vec<&str> = line.split_whitespace().collect();
+            if f.len() != 18 {
+                println!("err input");
+                continue;
+            }
+            let mut image: Vec<u8> = (0..f[0].len() / 2).filter_map(|k| u8::from_str_radix(&f[0][2 * k..2 * k + 2], 16).ok()).collect();
+            image.resize(64, 0);
+            let mut soc = Soc::new(64 * 1024, image);
+            let mut cpu = Cpu::new(XIP_BASE);
+            cpu.sp = RAM_BASE + 0x8000;
+            for (k, r) in cpu.regs.iter_mut().enumerate() {
+                *r = u32::from_str_radix(f[1 + k], 16).unwrap_or(0);
+            }
+            cpu.flags = if f[17] == "1" { fm1_core::F_C } else { 0 };
+            let mut r = cpu.step(&mut soc);
+            if r.is_ok() && cpu.pair_pending.is_some() {
+                r = cpu.step(&mut soc);
+            }
+            match r {
+                Ok(()) => println!("{} {}", cpu.regs.iter().map(|v| format!("{v:x}")).collect::<Vec<_>>().join(" "),
+                                   (cpu.flags & fm1_core::F_C != 0) as u8),
+                Err(e) => println!("err {}", format!("{e:?}").split_whitespace().next().unwrap_or("")),
+            }
+        }
+        return ExitCode::SUCCESS;
+    }
+    // `--list IMAGE START END`: a linear listing with the emulator's own decoder (it knows the
+    // FPU and the float compares objdump cannot print): address, bytes, syntax, slot values,
+    // and the micro-op the core runs
+    if let Some(i) = std::env::args().position(|a| a == "--list") {
+        let a: Vec<String> = std::env::args().skip(i + 1).take(3).collect();
+        let num = |s: &str| u32::from_str_radix(s.trim_start_matches("0x"), 16).ok();
+        let (Some(image), Some(start), Some(end)) = (a.first().and_then(|p| std::fs::read(p).ok()),
+            a.get(1).and_then(|s| num(s)), a.get(2).and_then(|s| num(s))) else {
+            eprintln!("usage: fm1-emu --list IMAGE START END (hex)");
+            return ExitCode::FAILURE;
+        };
+        let mut pc = start;
+        while pc < end {
+            let o = (pc - XIP_BASE) as usize;
+            let mut win = 0u64;
+            for k in 0..6 {
+                win |= (*image.get(o + k).unwrap_or(&0) as u64) << (8 * k);
+            }
+            match fm1_isa::decode_win(win, pc) {
+                Ok(insn) => {
+                    let n = insn.entry.len as usize;
+                    let bytes: Vec<String> = (0..n).map(|k| format!("{:02x}", (win >> (8 * k)) & 0xff)).collect();
+                    let vals: Vec<String> = insn.entry.slots.iter().map(|sl| sl.value(win).to_string()).collect();
+                    let d = fm1_core::describe(win, pc).unwrap_or_default();
+                    println!("{pc:08x}  {:<18} {:<34} [{}]  {d}", bytes.join(" "), insn.entry.syntax, vals.join(", "));
+                    pc += n as u32;
+                }
+                Err(_) => {
+                    println!("{pc:08x}  {:02x} {:02x}               ?", win & 0xff, (win >> 8) & 0xff);
+                    pc += 2;
+                }
+            }
+        }
+        return ExitCode::SUCCESS;
+    }
+    // `--exec-check OBJDUMP IMAGE`: execute every instruction the listing shows once, on a sandbox
+    // CPU (registers pointing into RAM) over IMAGE mapped at XIP, and report the classes the core
+    // cannot execute (Unsupported / MissingSlot), grouped by class, with an example each
+    if let Some(i) = std::env::args().position(|a| a == "--exec-check") {
+        let path = std::env::args().nth(i + 1).unwrap_or_default();
+        let bin = std::env::args().nth(i + 2).unwrap_or_default();
+        let (Ok(text), Ok(image)) = (std::fs::read_to_string(&path), std::fs::read(&bin)) else {
+            eprintln!("usage: fm1-emu --exec-check OBJDUMP IMAGE");
+            return ExitCode::FAILURE;
+        };
+        let mut soc = Soc::new(1 << 20, image);
+        let mut cpu = Cpu::new(0);
+        let mut bad: Vec<(&'static str, u32, String, u32)> = Vec::new();
+        let (mut tried, mut panics) = (0u32, 0u32);
+        for line in text.lines() {
+            let Some((addr, rest)) = line.trim_start().split_once(':') else { continue };
+            let Ok(pc) = u32::from_str_radix(addr.trim(), 16) else { continue };
+            let mut parts = rest.split('\t').filter(|p| !p.trim().is_empty());
+            let bytes = parts.next().unwrap_or("");
+            let asm = parts.next().unwrap_or("").trim().to_string();
+            if bytes.split_whitespace().count() == 0 || asm.contains("unknown") {
+                continue;
+            }
+            tried += 1;
+            cpu.pc = pc;
+            cpu.regs = [0x01c4_0000; 16];
+            cpu.sp = 0x01c8_0000;
+            cpu.rets = 0x01c4_0000;
+            cpu.rep_reg = None;
+            cpu.rep_count = 0;
+            cpu.pred_skips.clear();
+            cpu.pair_pending = None;
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cpu.step(&mut soc)));
+            match r {
+                Ok(Err(CoreError::Unsupported { name, .. })) | Ok(Err(CoreError::MissingSlot { name, .. })) => {
+                    match bad.iter_mut().find(|b| b.0 == name) {
+                        Some(b) => b.3 += 1,
+                        None => bad.push((name, pc, asm, 1)),
+                    }
+                }
+                Err(_) => {
+                    panics += 1;
+                    cpu = Cpu::new(0);
+                }
+                _ => {}
+            }
+        }
+        bad.sort_by_key(|b| std::cmp::Reverse(b.3));
+        for (name, pc, asm, n) in &bad {
+            println!("{n:6}  {name:32} {pc:#010x}  {asm}");
+        }
+        println!("{tried} instructions executed, {} classes unsupported ({} instructions), {panics} panics",
+            bad.len(), bad.iter().map(|b| b.3).sum::<u32>());
+        return ExitCode::SUCCESS;
+    }
+    let mut args = match parse_args() {
+        Some(a) => a,
+        None => {
+            eprintln!("{USAGE}");
+            return ExitCode::from(2);
+        }
+    };
+    if args.seed.is_some() && args.flaky_core1.is_none() {
+        eprintln!("error: --seed needs --flaky-core1 (it seeds its misreads)");
+        return ExitCode::from(2);
+    }
+    if args.ram > MAX_RAM {
+        eprintln!("error: --ram {} is more than the {MAX_RAM} bytes between {RAM_BASE:#010x} and the code at {XIP_BASE:#010x}", args.ram);
+        return ExitCode::from(2);
+    }
+
+    let mut flash_image: Option<Vec<u8>> = None;
+    let mut stock: Option<fm1_soc::Stock> = None;
+    if let Some(path) = &args.fwsc {
+        let syx = match args.syx.as_ref().map(std::fs::read).transpose() {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("error: cannot read the --syx bank: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
+        match std::fs::read(path).map_err(|e| e.to_string()).and_then(|p| fm1_soc::stock_from_package(&p, syx.as_deref())) {
+            Ok(st) => {
+                // FM1_FWSC_XIP=file: save the XIP window (the app area unscrambled) for a disassembler
+                if let Ok(out) = std::env::var("FM1_FWSC_XIP") {
+                    let _ = std::fs::write(&out, &st.xip);
+                    println!("XIP window ({} bytes from 0x02000000, {}) -> {out}", st.xip.len(), st.identity);
+                }
+                if std::env::var_os("FM1_FWSC_DIR").is_some() {
+                    if let Ok(u) = std::fs::read(path).map_err(|e| e.to_string()).and_then(|p| fm1_soc::fwsc::unpack(&p)) {
+                        println!("app area at {:#x}, {} bytes visible through XIP", u.area, u.xip.len());
+                        for h in &u.dir {
+                            println!("  {:16} offset {:#08x} size {:#08x} flags {:#04x}", h.name, h.offset, h.size, h.flags);
+                        }
+                    }
+                }
+                args.bin = path.clone();
+                args.entry = st.entry;
+                stock = Some(st);
+            }
+            Err(e) => {
+                eprintln!("error: {path}: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+    let read = if let Some(st) = &stock { Ok(st.xip.clone()) } else { std::fs::read(&args.bin) };
+    let mut image = match read {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("error: cannot read {}: {e}", args.bin);
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Some(flash) = &args.flash {
+        match std::fs::read(flash) {
+            Ok(f) if f.len() > APP_FLASH_OFFSET && f[APP_FLASH_OFFSET..].starts_with(&image) => {
+                image = f[XIP_FLASH_OFFSET..].to_vec();
+                flash_image = Some(f);
+                if args.entry == XIP_BASE {
+                    args.entry = XIP_BASE + (APP_FLASH_OFFSET - XIP_FLASH_OFFSET) as u32;
+                }
+            }
+            Ok(_) => {
+                eprintln!("error: {flash} does not contain {} at {APP_FLASH_OFFSET:#x}", args.bin);
+                return ExitCode::FAILURE;
+            }
+            Err(e) => {
+                eprintln!("error: cannot read {flash}: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+    // pad the XIP window so sparse reads-return-0 behaviour is explicit
+    image.resize(image.len().max(1) , 0);
+
+    let mut soc = Soc::new(args.ram, image);
+    // FM1_LCD_TIMED (or FM1_STRICT): the LCD's transfers take their time, as on an FM-1
+    soc.lcd_timed = fm1_soc::lcd_timed_from_env();
+    soc.cpu1_survives = args.cpu1_survives;
+    soc.flaky_core1 = args.flaky_core1.map(|rate| fm1_soc::flaky::FlakyCore1::new(rate, args.seed.unwrap_or(1)));
+    if let Some(f) = &flash_image {
+        soc.flash.load(f);
+    }
+    if let Some(path) = &args.raw_flash {
+        match std::fs::read(path) {
+            Ok(raw) => soc.flash.load(&raw),
+            Err(e) => {
+                eprintln!("error: cannot read {path}: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+    let mut cpu = Cpu::new(args.entry);
+    // the SPL hands cpu0 over in user mode: crt0s set `sp` and then a different `ssp`
+    // (the stock app's two stacks, Felucca's _ustack/_sstack); cpu1 starts in supervisor mode
+    // (the stock stub leaves it with `rti`). FM1_SUPERVISOR_START: the old single stack.
+    cpu.user = std::env::var_os("FM1_SUPERVISOR_START").is_none();
+    // The SPL enters the app with r0 -> its boot-parameter struct, whose
+    // first word points at a chip-info block (boot_hwinfo_save at
+    // 0x020000C6 copies both into 0x01C7FD50). Hand the CRT an all-zero
+    // pair at the top of RAM so those reads stay inside memory.
+    let params = RAM_BASE + 0x7fc00;
+    soc.write32(params, params + 0x40);
+    cpu.regs[0] = params;
+    if let Some(f) = &flash_image {
+        // a whole flash image: the stock firmware, which reads the SPL's boot parameters
+        cpu.regs[0] = fm1_soc::write_boot_info(&mut soc, params, f);
+    }
+    if let Some(st) = &stock {
+        cpu.regs[0] = fm1_soc::stock_boot(&mut soc, &st.flash, params, st.board);
+    }
+    if let Some(ms) = args.ms {
+        args.steps = soc.periph.cycle_of_ms(ms);
+    }
+    for k in &args.keys {
+        match parse_key_script(k, soc.board) {
+            Some(evs) => {
+                for (ms, a) in evs {
+                    let at = soc.periph.cycle_of_ms(ms);
+                    soc.periph.script.push_back((at, a));
+                }
+            }
+            None => {
+                eprintln!("error: bad --keys item {k:?}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+    soc.periph.script.make_contiguous().sort_by_key(|(c, _)| *c);
+    let mut snaps: Vec<u64> = args.snap.clone();
+    snaps.sort_unstable();
+    let mut irq_count: u64 = 0;
+    // interrupts taken per source and core (the summary's busiest)
+    let mut irq_by: std::collections::BTreeMap<(u32, u8), u64> = Default::default();
+    // cpu0 instructions outside any ISR, in one ISR level, in a nested level
+    let mut busy = [0u64; 3];
+    let irq_trace = std::env::var("FM1_IRQ_TRACE").is_ok();
+    // cpu1 (core id 1) is held until cpu0 releases it with `0x10008 |= 8`
+    // in cpu1_boot_start; it then boots from the vector at 0x02000098.
+    let mut cpus: Vec<Cpu> = vec![cpu];
+    let mut cpu1_started = false;
+    let mut report_core = 0usize;
+
+    if !args.quiet {
+        println!(
+            "fm1-emu: {} bytes at {XIP_BASE:#010x}, entry {:#010x}, ram {} bytes at {RAM_BASE:#010x}",
+            soc.xip.len(),
+            args.entry,
+            soc.ram.len(),
+        );
+    }
+
+    let mut hist: HashMap<&'static str, u64> = HashMap::new();
+    let mut pchist: HashMap<u32, u64> = HashMap::new();
+    // per-halfword counters for code in XIP (the HashMap above keeps RAM pcs)
+    let mut xip_hist: Vec<u64> = vec![0; soc.xip.len() / 2 + 1];
+    let mut halt: Option<CoreError> = None;
+    let mut nop_run = 0u32;
+    let mut watch_val = args.watch.map(|a| soc.read32(a));
+    let mut break_hits = 0u32;
+    let break_max: u32 = std::env::var("FM1_BREAK_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(8);
+    // FM1_TRACE_RANGE=start:end: every instruction in that range of total steps
+    let trace_range: Option<(u64, u64)> = std::env::var("FM1_TRACE_RANGE").ok().and_then(|v| {
+        let (a, b) = v.split_once(':')?;
+        Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
+    });
+    // FM1_BREAK_PCS=hex,hex: more breakpoints (same report as --break-pc)
+    let extra_breaks: Vec<u32> = std::env::var("FM1_BREAK_PCS").ok()
+        .map(|v| v.split(',').filter_map(|x| u32::from_str_radix(x.trim().trim_start_matches("0x"), 16).ok()).collect())
+        .unwrap_or_default();
+    let mut last_pc = cpus[0].pc;
+    let mut total_steps: u64 = 0;
+    let mut ring: Vec<u32> = Vec::new();
+    // last executed instructions (pc, class, sp) for the halt report
+    let mut tail: std::collections::VecDeque<(u32, &'static str, u32)> = std::collections::VecDeque::new();
+    // per core: the last 60 instructions that were not a `nop` (a jump into zeroed memory
+    // slides through nops; this keeps where it came from)
+    let mut tails: [std::collections::VecDeque<(u32, &'static str, u32)>; 2] = Default::default();
+
+    let dump_every: u64 = 1 << 20;
+    let mut stop = false;
+    let mut park = false; // (core 1 stopped on a fault this step: dropped below)
+    soc.take_boot(&cpus[0]);
+    for _ in 0..args.steps {
+        // a chip reset (the watchdog, PR_PWR): cpu0 from its start, core 1 held again
+        if soc.reset_due() {
+            soc.chip_reset(&mut cpus[0]);
+            cpus.truncate(1);
+            cpu1_started = false;
+            if !args.quiet {
+                println!("chip reset at step {total_steps} ({} ms)", soc.periph.ms());
+            }
+        }
+        if !cpu1_started && (std::mem::take(&mut soc.cpu1_release) || soc.read32(0x10008) & 8 != 0) {
+            // Where cpu1 really starts is not settled (docs/isa-notes.md):
+            // the vector at 0x02000098 `rti`s into the middle of an
+            // instruction of cpu_ipc_call_sync. The routine that
+            // acknowledges the boot (b[0x01C1FF08] = 1) is the RAM function
+            // at 0x01C022B6 (flash 0x02086AD6), so enter there with the
+            // stacks the vector would have set.
+            // The release writes core 1's entry into the word at 0x01C7FFF8 and the chip's ROM
+            // jumps there (X0X's fm1_cpu1.h documents the sequence; the stock firmware's stub
+            // at 0x020001B8 sets its own stacks). Older images without it: the RAM render loop.
+            let entry = soc.read32(0x01C7_FFF8);
+            let in_code = (XIP_BASE..XIP_BASE + 0x0100_0000).contains(&entry) || (RAM_BASE..RAM_BASE + 0x0010_0000).contains(&entry);
+            let mut c1 = Cpu::new(if in_code { entry } else { RAM_BASE + 0x22b6 });
+            c1.core_id = 1;
+            c1.usp = RAM_BASE + 0x15eb4;
+            c1.sp = RAM_BASE + 0x16eb4;
+            if !args.quiet {
+                println!("cpu1 entry {:#010x} (word at 0x01C7FFF8: {entry:#010x})", c1.pc);
+            }
+            cpus.push(c1);
+            cpu1_started = true;
+            if !args.quiet {
+                println!("cpu1 released at step {total_steps}");
+            }
+        }
+        for ci in 0..cpus.len() {
+            let cpu = &mut cpus[ci];
+            total_steps += 1;
+            if soc.core_paused(cpu.core_id) {
+                // held by the other core (CON bit 2); time runs on with cpu0's slot
+                if ci == 0 {
+                    soc.advance(1);
+                }
+                continue;
+            }
+            if cpu.core_id == 1 && soc.cpu1_idle {
+                // asleep since its `idle`, until an interrupt from its bank is pending
+                if soc.pending_irq_for(1).is_none() {
+                    continue;
+                }
+                soc.cpu1_idle = false;
+            }
+            if (Some(cpu.pc) == args.break_pc || extra_breaks.contains(&cpu.pc)) && break_hits < break_max {
+                break_hits += 1;
+                println!("break c{} pc={:#010x} [{}] sp={:#010x} rets={:#010x} irq_levels={:?} r0-11={:x?}", cpu.core_id, cpu.pc, total_steps, cpu.sp, cpu.rets, cpu.irq_levels, &cpu.regs[..12]);
+                if break_hits == break_max {
+                    println!("    (the last hit shown: FM1_BREAK_MAX={break_max})");
+                }
+                for (ri, &v) in cpu.regs[..3].iter().enumerate() {
+                    if (RAM_BASE..RAM_BASE + 0x0010_0000).contains(&v) || (XIP_BASE..XIP_BASE + 0x0010_0000).contains(&v) {
+                        let bytes: Vec<u8> = (0..40).map(|k| soc.read8(v + k)).collect();
+                        let text: String = bytes.iter().map(|&b| if (32..127).contains(&b) { b as char } else { '.' }).collect();
+                        println!("    r{ri} -> {text:?}");
+                    }
+                }
+                if break_hits == 1 {
+                    // how it got here: the last instructions (both cores interleaved)
+                    for (pc, name, sp) in &tail {
+                        println!("    {pc:#010x} sp={sp:#010x} {name}");
+                    }
+                }
+            }
+            if total_steps > 0 && total_steps % dump_every == 0 {
+                let _ = fm1_soc::write_bmp("work/lcd.bmp", &soc.lcd.fb, soc.lcd.inverted);
+            }
+            last_pc = cpu.pc;
+            let tail_name = soc_instruction_name(&soc, &cpu, last_pc).unwrap_or("?");
+            if let Some((a, b)) = trace_range {
+                if (a..b).contains(&total_steps) {
+                    println!("T {total_steps} c{} {last_pc:#010x} {tail_name} irq={:?} ie={} r0={:#x} r1={:#x}", cpu.core_id, cpu.irq_levels, cpu.ie, cpu.regs[0], cpu.regs[1]);
+                }
+            }
+            if tail.len() >= 80 {
+                tail.pop_front();
+            }
+            tail.push_back((last_pc, tail_name, cpu.sp));
+            if tail_name != "nop" && tail_name != "?" {
+                let t = &mut tails[(cpu.core_id as usize).min(1)];
+                if t.len() >= 60 {
+                    t.pop_front();
+                }
+                t.push_back((last_pc, tail_name, cpu.sp));
+            }
+            // a pc outside every code region: a wild jump (report where it came from)
+            let pc = cpu.pc;
+            let mapped = (RAM_BASE..RAM_BASE + 0x0010_0000).contains(&pc)
+                || (XIP_BASE..XIP_BASE + 0x0010_0000).contains(&pc)
+                || (0x0400_0000..0x0410_0000).contains(&pc)
+                || (0x01f0_0000..0x01f1_0000).contains(&pc);
+            if !mapped {
+                halt = Some(CoreError::Decode(fm1_isa::DecodeError::UnknownInstruction { raw: 0, addr: pc }));
+                println!("halt: core {} jumped to {pc:#010x} (outside every code region)", cpu.core_id);
+                report_core = ci;
+                stop = true;
+                break;
+            }
+            // a run of literal-zero `nop`s means we fell into empty RAM
+            if tail_name == "nop" { nop_run += 1 } else { nop_run = 0 }
+            if nop_run > 24 {
+                halt = Some(CoreError::Decode(fm1_isa::DecodeError::UnknownInstruction { raw: 0, addr: last_pc }));
+                println!("halt: nop slide (>24 consecutive nops) at {last_pc:#010x}");
+                report_core = ci;
+                stop = true;
+                break;
+            }
+            if ci == 0 {
+                soc.advance(1);
+                if let Some(&at) = snaps.first() {
+                    if soc.periph.ms() >= at {
+                        snaps.remove(0);
+                        let _ = fm1_soc::write_bmp(&format!("work/lcd_{at}.bmp"), &soc.lcd.fb, soc.lcd.inverted);
+                    }
+                }
+            }
+            // each core takes the pending sources its own bank enables (0x1EEF100 / 0x1EEF300);
+            // one vector table serves both
+            if let Some((n, prio)) = soc.pending_irq_for(cpu.core_id) {
+                if cpu.irq_ready(prio) {
+                    let handler = soc.read32(fm1_soc::VEC_BASE + 4 * n as u32);
+                    if irq_trace {
+                        println!("c{} irq {n} prio {prio} -> {handler:#010x} at {} ms (pc {:#010x}, depth {})", cpu.core_id, soc.periph.ms(), cpu.pc, cpu.irq_levels.len());
+                    }
+                    cpu.interrupt(handler, prio);
+                    irq_count += 1;
+                    *irq_by.entry((cpu.core_id, n as u8)).or_default() += 1;
+                }
+            }
+            if ci == 0 {
+                if cpu.irq_levels.is_empty() { busy[0] += 1 } else { busy[cpu.irq_levels.len().min(2)] += 1 }
+            }
+            let stepped = if cpu.core_id == 1 && soc.flaky_core1.is_some() {
+                cpu.step(&mut fm1_soc::machine::Core1Loads(&mut soc))
+            } else {
+                cpu.step(&mut soc)
+            };
+            match stepped {
+                Ok(()) => {
+                    if let (Some(a), Some(old)) = (args.watch, watch_val) {
+                        let now = soc.read32(a);
+                        if now != old {
+                            println!("watch {a:#010x}: {old:#010x} -> {now:#010x} at pc={last_pc:#010x} [{}]", cpu.insn_count);
+                            watch_val = Some(now);
+                        }
+                    }
+                    *hist.entry(tail_name).or_insert(0) += 1;
+                    if last_pc >= XIP_BASE && ((last_pc - XIP_BASE) as usize) < xip_hist.len() * 2 {
+                        xip_hist[((last_pc - XIP_BASE) / 2) as usize] += 1;
+                    } else {
+                        *pchist.entry(last_pc).or_insert(0) += 1;
+                    }
+                    if ring.len() >= 12 {
+                        ring.remove(0);
+                    }
+                    ring.push(last_pc);
+                    if let Some(k) = args.trace {
+                        if cpu.insn_count <= k && !args.quiet {
+                            println!(
+                                "[{count:8}] pc={pc:#010x} sp={sp:#010x} insn={insn} r0={r0:#010x}",
+                                count = cpu.insn_count,
+                                pc = last_pc,
+                                sp = cpu.sp,
+                                insn = soc_instruction_name(&soc, &cpu, last_pc)
+                                    .unwrap_or("?"),
+                                r0 = cpu.regs[0],
+                            );
+                        }
+                    }
+                }
+                Err(e) if cpu.core_id == 1 && soc.cpu1_survives => {
+                    // the chip's core 1 faults there and stops; cpu0 goes on alone
+                    if !args.quiet { println!("cpu1 stopped at step {total_steps} ({} ms): {e:?} at pc {:#010x} (the chip's core would fault; cpu0 goes on alone)", soc.periph.ms(), cpu.pc); }
+                    soc.cpu1_fault = Some(format!("{e:?}"));
+                    park = true;
+                    break;
+                }
+                Err(e) => {
+                    halt = Some(e);
+                    report_core = ci;
+                    stop = true;
+                    break;
+                }
+            }
+        }
+        if park {
+            cpus.truncate(1);
+            park = false;
+        }
+        if stop {
+            break;
+        }
+    }
+    let cpu = &cpus[report_core];
+
+    if !args.quiet {
+        let stopped = halt.is_some() || true;
+        let mut top: Vec<(&'static str, u64)> = hist.into_iter().collect();
+        top.sort_by_key(|(_, c)| std::cmp::Reverse(*c));
+        let total: u64 = top.iter().map(|(_, c)| c).sum();
+        println!(
+            "stopped after {} instructions ({}, hist top-{} of {} classes):",
+            cpu.insn_count,
+            if halt.is_some() { "halt" } else { "step limit" },
+            top.len().min(12),
+            top.len().min(1) * 0 + top.len().max(1),
+        );
+        let top_n = std::env::var("FM1_HIST_TOP").ok().and_then(|v| v.parse().ok()).unwrap_or(12);
+        for (name, n) in top.iter().take(top_n) {
+            println!("  {name:<28} {n:8} ({:5.1}%)", 100.0 * *n as f64 / total as f64);
+        }
+        if total > 0 {
+            let _ = total;
+        }
+        let mut pcs: Vec<(u32, u64)> = pchist.into_iter().collect();
+        pcs.extend(xip_hist.iter().enumerate().filter(|(_, &n)| n > 0).map(|(i, &n)| (XIP_BASE + 2 * i as u32, n)));
+        pcs.sort_by_key(|(_, c)| std::cmp::Reverse(*c));
+        println!("last executed pcs:");
+        for (i, pc) in ring.iter().enumerate() {
+            print!("{}{pc:#x}", if i == 0 { "" } else { " -> " });
+        }
+        println!();
+        println!("pc histogram top-8:");
+        for (pc, n) in pcs.iter().take(8) {
+            println!("  {pc:#010x}  {n}");
+        }
+        {
+            let _ = fm1_soc::write_bmp("work/lcd.bmp", &soc.lcd.fb, soc.lcd.inverted);
+            let tot = (busy[0] + busy[1] + busy[2]).max(1) as f64;
+            println!(
+                "cpu0: {:.1}% in an ISR, {:.1}% nested ({:.1} M ISR instructions per emulated s)",
+                100.0 * busy[1] as f64 / tot,
+                100.0 * busy[2] as f64 / tot,
+                (busy[1] + busy[2]) as f64 / (soc.periph.ms().max(1) as f64 / 1000.0) / 1e6
+            );
+            println!(
+                "time {} ms, {} interrupts, {} audio halves ({} samples)",
+                soc.periph.ms(),
+                irq_count,
+                soc.periph.audio_halves,
+                soc.periph.audio.len() / 2
+            );
+            let mut by: Vec<_> = irq_by.iter().collect();
+            by.sort_by(|a, b| b.1.cmp(a.1));
+            let by: Vec<String> = by.iter().take(8).map(|((c, n), k)| format!("c{c} irq {n} x{k}")).collect();
+            println!("interrupts by source: {}", by.join(", "));
+            if let Some(f) = &soc.flaky_core1 {
+                println!("flaky core 1 (seed {}): {} misreads in {} RAM loads", args.seed.unwrap_or(1), f.misreads, f.loads);
+            }
+            if let Some(w) = &args.wav {
+                match write_wav(w, &soc.periph.audio) {
+                    Ok(()) => println!("wav: {w} ({:.2} s)", soc.periph.audio.len() as f64 / 2.0 / 44100.0),
+                    Err(e) => println!("wav: cannot write {w}: {e}"),
+                }
+            }
+            let con = soc.console_string();
+            if !con.is_empty() {
+                println!("console ({} bytes):", con.len());
+                for line in con.lines().take(20) {
+                    println!("  | {line}");
+                }
+            }
+            println!(
+                "lcd frames={} inverted={} display_on={}",
+                soc.lcd.frames, soc.lcd.inverted, soc.lcd.display_on,
+            );
+        if let Some(h) = soc.gpio_writes.clone() {
+            println!("gpio writes by address:");
+            for (a, n) in h {
+                println!("  {a:#07x} x{n}  now {:#010x}", soc.read32(a));
+            }
+        }
+        // FM1_LIST_END=addr:len[,addr:len]: list memory as it is after the run (RAM code too)
+        if let Ok(spec) = std::env::var("FM1_LIST_END") {
+            for part in spec.split(',') {
+                let Some((a, n)) = part.split_once(':') else { continue };
+                let (Ok(mut pc), Ok(n)) = (u32::from_str_radix(a.trim_start_matches("0x"), 16), u32::from_str_radix(n.trim_start_matches("0x"), 16)) else { continue };
+                let end = pc + n;
+                println!("listing {pc:#010x}..{end:#010x}:");
+                while pc < end {
+                    let mut win = 0u64;
+                    for k in 0..6 {
+                        win |= (soc.read8(pc + k) as u64) << (8 * k);
+                    }
+                    match fm1_isa::decode_win(win, pc) {
+                        Ok(insn) => {
+                            let len = insn.entry.len as u32;
+                            let bytes: Vec<String> = (0..len).map(|k| format!("{:02x}", (win >> (8 * k)) & 0xff)).collect();
+                            let vals: Vec<String> = insn.entry.slots.iter().map(|sl| sl.value(win).to_string()).collect();
+                            println!("  {pc:08x}  {:<18} {:<34} [{}]  {}", bytes.join(" "), insn.entry.syntax, vals.join(", "), fm1_core::describe(win, pc).unwrap_or_default());
+                            pc += len;
+                        }
+                        Err(_) => {
+                            println!("  {pc:08x}  {:04x} ?", win & 0xffff);
+                            pc += 2;
+                        }
+                    }
+                }
+            }
+        }
+        }
+        if let Some(e) = &halt {
+            println!("last instructions before the halt:");
+            for (pc, name, sp) in &tail {
+                println!("  {pc:#010x} sp={sp:#010x} {name}");
+            }
+            println!("core {report_core}'s last instructions that were not nops:");
+            for (pc, name, sp) in &tails[report_core.min(1)] {
+                println!("  {pc:#010x} sp={sp:#010x} {name}");
+            }
+            println!("halt reason: {e:?}");
+            println!("{}", buildinfo::halt_note("fm1-emu"));
+            println!("  pc={:#010x} sp={:#010x} rets={:#010x}", cpu.pc, cpu.sp, cpu.rets);
+            for (i, r) in cpu.regs.iter().enumerate() {
+                print!("r{i}={r:#010x} ");
+            }
+            println!();
+        }
+        let mmio = soc.unknown_accesses();
+        if !mmio.is_empty() {
+            // one line per (address, direction), in first-hit order
+            let mut seen: Vec<(u32, bool, u32, u64)> = Vec::new();
+            for a in mmio {
+                match seen.iter_mut().find(|s| s.0 == a.addr && s.1 == a.is_write) {
+                    Some(s) => s.3 += 1,
+                    None => seen.push((a.addr, a.is_write, a.value, 1)),
+                }
+            }
+            println!(
+                "{} unknown MMIO accesses at {} addresses (bring-up list, first 24):",
+                mmio.len(),
+                seen.len()
+            );
+            for (addr, is_write, value, n) in seen.iter().take(24) {
+                let op = if *is_write { "write" } else { "read " };
+                println!("  {op} @ {addr:#010x} first value={value:#010x} x{n}");
+            }
+        }
+        let _ = stopped;
+    }
+    if let Some((addr, n)) = args.dump {
+        println!("dump {addr:#010x} ({n} words):");
+        for row in (0..n).step_by(8) {
+            let words: Vec<String> = (row..(row + 8).min(n)).map(|k| format!("{:08x}", soc.read32(addr + 4 * k))).collect();
+            println!("  {:#010x}: {}", addr + 4 * row, words.join(" "));
+        }
+    }
+    ExitCode::SUCCESS
+}
+
+/// The SoC doesn't track names; recover the executed class name by decoding
+/// at the PC the step started from (cheap; runs once per step only under
+/// tracing).
+fn soc_instruction_name(_soc: &Soc, cpu: &Cpu, pc: u32) -> Option<&'static str> {
+    if let Ok(win) = fetch_window(_soc, pc) {
+        if let Ok(insn) = fm1_isa::decode_win_cached(win, pc) {
+            let _ = cpu;
+            return Some(insn.entry.name);
+        }
+    }
+    None
+}
+
+fn fetch_window(soc: &Soc, pc: u32) -> Result<u64, ()> {
+    if pc >= XIP_BASE && (pc - XIP_BASE) + 6 <= soc.xip.len() as u32 {
+        let o = (pc - XIP_BASE) as usize;
+        let b = &soc.xip[o..o + 6];
+        let mut w = 0u64;
+        for (i, byte) in b.iter().enumerate() {
+            w |= (*byte as u64) << (8 * i);
+        }
+        return Ok(w);
+    }
+    // RAM code (copied by the firmware itself) decodes too
+    if pc >= RAM_BASE && (pc - RAM_BASE) + 6 <= soc.ram.len() as u32 {
+        let mut w = 0u64;
+        for i in 0..6u32 {
+            w |= (soc.ram.read8(pc - RAM_BASE + i) as u64) << (8 * i);
+        }
+        return Ok(w);
+    }
+    Err(())
+}
+
+/// `--coverage`: execute the first corpus sample of every ISA class on a
+/// scratch SoC and report the classes whose semantics are missing, grouped
+/// by printed shape and weighted by corpus count. The to-do list for the
+/// core, in priority order.
+fn coverage_report() -> ExitCode {
+    use std::collections::BTreeMap;
+    let mut unsupported: BTreeMap<&'static str, (u64, Vec<&'static str>)> = BTreeMap::new();
+    let mut no_slots: BTreeMap<&'static str, (u64, Vec<&'static str>)> = BTreeMap::new();
+    let (mut ok_n, mut ok_w, mut total_w) = (0u64, 0u64, 0u64);
+    for e in fm1_isa::ISA.iter() {
+        total_w += e.count as u64;
+        let Some(&sample) = e.samples.first() else { continue };
+        let mut image = sample.to_le_bytes().to_vec();
+        image.resize(64, 0);
+        let mut soc = Soc::new(64 * 1024, image);
+        let mut cpu = Cpu::new(XIP_BASE);
+        cpu.sp = RAM_BASE + 0x8000;
+        for r in cpu.regs.iter_mut() {
+            *r = RAM_BASE + 0x1000;
+        }
+        match cpu.step(&mut soc) {
+            Ok(()) => {
+                ok_n += 1;
+                ok_w += e.count as u64;
+            }
+            Err(CoreError::Unsupported { .. }) | Err(CoreError::MissingSlot { .. }) => {
+                let bucket = if e.slots.is_empty() { &mut no_slots } else { &mut unsupported };
+                let ent = bucket.entry(e.syntax).or_insert((0, Vec::new()));
+                ent.0 += e.count as u64;
+                ent.1.push(e.name);
+            }
+            Err(_) => {}
+        }
+    }
+    println!(
+        "{ok_n} classes execute ({:.1}% of corpus instructions by weight)",
+        100.0 * ok_w as f64 / total_w.max(1) as f64
+    );
+    for (title, map) in [("no semantics for the shape (slots solved)", &unsupported), ("operand slots unsolved", &no_slots)] {
+        let mut rows: Vec<_> = map.iter().collect();
+        rows.sort_by_key(|(_, (w, _))| std::cmp::Reverse(*w));
+        let w: u64 = rows.iter().map(|(_, (w, _))| w).sum();
+        println!("-- {title}: {} shapes, {:.1}% of corpus", rows.len(), 100.0 * w as f64 / total_w.max(1) as f64);
+        for (syntax, (w, names)) in rows.iter().take(60) {
+            println!("  {w:6}  {syntax:<40} {}", names.join(" "));
+        }
+    }
+    ExitCode::SUCCESS
+}
+
+fn parse_args() -> Option<Args> {
+    let a: Vec<String> = std::env::args().collect();
+    let mut i = 1;
+    let mut args = Args {
+        bin: String::new(),
+        flash: None,
+        raw_flash: None,
+        fwsc: None,
+        syx: None,
+        entry: XIP_BASE, // reset vector; the CRT sets sp/ssp and copies .data
+        steps: DEFAULT_STEPS,
+        trace: None,
+        quiet: false,
+        ram: DEFAULT_RAM,
+        watch: None,
+        break_pc: None,
+        dump: None,
+        ms: None,
+        wav: None,
+        keys: Vec::new(),
+        snap: Vec::new(),
+        flaky_core1: None,
+        cpu1_survives: false,
+        seed: None,
+    };
+    let mut have_bin = false;
+    while i < a.len() {
+        match a[i].as_str() {
+            "--bin" => {
+                args.bin = a.get(i + 1)?.clone();
+                have_bin = true;
+                i += 2;
+            }
+            "--entry" => {
+                args.entry = parse_hex(a.get(i + 1)?)?;
+                i += 2;
+            }
+            "--fwsc" => {
+                args.fwsc = Some(a.get(i + 1)?.clone());
+                have_bin = true;
+                i += 2;
+            }
+            "--syx" => {
+                args.syx = Some(a.get(i + 1)?.clone());
+                i += 2;
+            }
+            "--raw-flash" => {
+                args.raw_flash = Some(a.get(i + 1)?.clone());
+                i += 2;
+            }
+            "--flash" => {
+                args.flash = Some(a.get(i + 1)?.clone());
+                i += 2;
+            }
+            "--steps" => {
+                args.steps = a.get(i + 1)?.parse().ok()?;
+                i += 2;
+            }
+            "--trace" => {
+                args.trace = Some(a.get(i + 1)?.parse::<u64>().ok()?);
+                i += 2;
+            }
+            "--ram" => {
+                args.ram = a.get(i + 1)?.parse().ok()?;
+                i += 2;
+            }
+            "--dump" => {
+                let addr = parse_hex(a.get(i + 1)?)?;
+                let n: u32 = a.get(i + 2)?.parse().ok()?;
+                args.dump = Some((addr, n));
+                i += 3;
+            }
+            "--break-pc" => {
+                args.break_pc = Some(parse_hex(a.get(i + 1)?)?);
+                i += 2;
+            }
+            "--watch" => {
+                args.watch = Some(parse_hex(a.get(i + 1)?)?);
+                i += 2;
+            }
+            "--quiet" => {
+                args.quiet = true;
+                i += 1;
+            }
+            "--cpu1-survives" => {
+                args.cpu1_survives = true;
+                i += 1;
+            }
+            "--ms" => {
+                args.ms = Some(a.get(i + 1)?.parse().ok()?);
+                i += 2;
+            }
+            "--wav" => {
+                args.wav = Some(a.get(i + 1)?.clone());
+                i += 2;
+            }
+            "--keys" => {
+                args.keys.extend(a.get(i + 1)?.split(',').map(|k| k.trim().to_string()).filter(|k| !k.is_empty()));
+                i += 2;
+            }
+            "--flaky-core1" => {
+                args.flaky_core1 = Some(a.get(i + 1)?.parse::<f64>().ok().filter(|r| (0.0..=1.0).contains(r))?);
+                i += 2;
+            }
+            "--seed" => {
+                args.seed = Some(a.get(i + 1)?.parse().ok()?);
+                i += 2;
+            }
+            "--snap" => {
+                for t in a.get(i + 1)?.split(',') {
+                    args.snap.push(t.trim().parse().ok()?);
+                }
+                i += 2;
+            }
+            _ => return None,
+        }
+    }
+    if have_bin {
+        Some(args)
+    } else {
+        None
+    }
+}
+
+fn parse_hex(s: &str) -> Option<u32> {
+    u32::from_str_radix(s.trim_start_matches("0x"), 16).ok()
+}
+
+/// One `--keys` item -> timed front-panel actions.
+///   `1000:PLAY`        press PLAY at 1.0 s for 150 ms
+///   `1000-1600:n7`     hold note key 7 (C4) from 1.0 to 1.6 s
+///   `2000:k12`         matrix key id 12
+///   `2000:enc0:+3`     3 clockwise clicks on encoder 0; names SELECT/ALGO/PRESET/K1..K4
+///   `2500:pot:512`     the MASTER pot (SARADC ch 4)
+///   `3000:midi:903c64` MIDI bytes into the MIDI IN jack (note on C4)
+fn parse_key_script(item: &str, board: fm1_soc::Board) -> Option<Vec<(u64, fm1_soc::Action)>> {
+    use fm1_soc::Action;
+    let mut parts = item.splitn(3, ':');
+    let when = parts.next()?;
+    let what = parts.next()?;
+    let arg = parts.next();
+    let (t0, t1) = match when.split_once('-') {
+        Some((a, b)) => (a.parse::<u64>().ok()?, Some(b.parse::<u64>().ok()?)),
+        None => (when.parse::<u64>().ok()?, None),
+    };
+    if what.eq_ignore_ascii_case("midi") {
+        let hex = arg?;
+        let bytes: Option<Vec<u8>> = (0..hex.len() & !1).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16).ok()).collect();
+        return Some(bytes?.into_iter().map(|b| (t0, Action::Midi { b })).collect());
+    }
+    if what.eq_ignore_ascii_case("pot") {
+        let v: u16 = arg?.parse().ok()?;
+        return Some(vec![(t0, Action::Adc { ch: 4, value: v })]);
+    }
+    if let Some(enc) = fm1_soc::periph::enc_id(what) {
+        let clicks: i32 = arg?.trim_start_matches('+').parse().ok()?;
+        return Some(vec![(t0, Action::Enc { enc, clicks })]);
+    }
+    // a name on this board's panel, as fm1-soc's script.rs has it (the SMK-37's ARP, FX, SEQ are its buttons, not
+    // the FM-1's keys of the same names)
+    let id = match board {
+        fm1_soc::Board::Smk37 => fm1_soc::smk::key_id(what),
+        fm1_soc::Board::Fm1 => fm1_soc::periph::key_id(what),
+    }?;
+    let up = t1.unwrap_or(t0 + 150);
+    Some(vec![(t0, Action::Key { id, down: true }), (up, Action::Key { id, down: false })])
+}
+
+fn write_wav(path: &str, samples: &[i16]) -> std::io::Result<()> {
+    use std::io::Write;
+    let data_len = (samples.len() * 2) as u32;
+    let mut f = std::io::BufWriter::new(std::fs::File::create(path)?);
+    f.write_all(b"RIFF")?;
+    f.write_all(&(36 + data_len).to_le_bytes())?;
+    f.write_all(b"WAVEfmt ")?;
+    f.write_all(&16u32.to_le_bytes())?;
+    f.write_all(&1u16.to_le_bytes())?; // PCM
+    f.write_all(&2u16.to_le_bytes())?; // stereo
+    f.write_all(&44100u32.to_le_bytes())?;
+    f.write_all(&(44100u32 * 4).to_le_bytes())?;
+    f.write_all(&4u16.to_le_bytes())?;
+    f.write_all(&16u16.to_le_bytes())?;
+    f.write_all(b"data")?;
+    f.write_all(&data_len.to_le_bytes())?;
+    for s in samples {
+        f.write_all(&s.to_le_bytes())?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod key_script_tests {
+    use super::parse_key_script;
+    use fm1_soc::{Action, Board};
+
+    fn first_key(item: &str, board: Board) -> Option<u8> {
+        parse_key_script(item, board)?.into_iter().find_map(|(_, a)| match a {
+            Action::Key { id, .. } => Some(id),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn names_are_the_boards_own() {
+        for name in ["ARP", "FX", "SEQ"] {
+            let smk = fm1_soc::smk::key_id(name);
+            assert!(smk.is_some(), "{name} is an SMK-37 button");
+            assert_eq!(first_key(&format!("100:{name}"), Board::Smk37), smk, "{name} on an SMK-37");
+            assert_eq!(first_key(&format!("100:{name}"), Board::Fm1), fm1_soc::periph::key_id(name), "{name} on an FM-1");
+        }
+    }
+}

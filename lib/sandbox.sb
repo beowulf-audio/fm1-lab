@@ -1,0 +1,38 @@
+;; fm1-lab's macOS sandbox for everything it runs that it didn't write: the emulator, compilers, firmware builds.
+;;
+;;   sandbox-exec -f lib/sandbox.sb -D HOME=$HOME -D WORK=/abs/dir -D READ1=/abs/dir -D READ2=/abs/dir cmd ...
+;;
+;; - no networking at all (internet and localhost, in and out)
+;; - files can be written only under WORK and the system's temporary directories
+;; - nothing in HOME can be read except WORK, READ1 and READ2 (pass a path that doesn't exist for an unused one):
+;;   no SSH keys, gh or cloud logins, keychains, browser data, .env files or other projects. System directories
+;;   (/usr, /System, /Library, /opt/homebrew, ...) stay readable, as compilers need them.
+;; Audio, MIDI and windows use Mach IPC, not sockets or HOME files, so the emulator's live mode keeps working.
+(version 1)
+(allow default)
+
+(deny network-outbound)
+(deny network-inbound)
+(deny network-bind)
+
+(deny file-write*)
+(allow file-write*
+  (subpath (param "WORK"))
+  (subpath "/private/tmp")
+  (subpath "/private/var/folders")
+  (literal "/dev/null")
+  (literal "/dev/zero")
+  (literal "/dev/tty")
+  (regex #"^/dev/fd/")
+  (regex #"^/dev/ttys[0-9]+$"))
+
+;; reading file contents in HOME: only the allowed directories (names and metadata stay visible, so paths resolve)
+(deny file-read-data (subpath (param "HOME")))
+(allow file-read-data
+  (subpath (param "WORK"))
+  (subpath (param "READ1"))
+  (subpath (param "READ2")))
+;; and nowhere at all: .env files and the keychains (also outside HOME)
+(deny file-read-data
+  (regex #"/\.env(\.[^/]*)?$")
+  (subpath "/Library/Keychains"))

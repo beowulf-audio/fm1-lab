@@ -1,0 +1,50 @@
+# A tour of a full firmware: notes and chords, every encoder, the page buttons, the sequencer and a save.
+# Meant for `compare` (two builds of one firmware), so it checks little itself; what it exercises is the point.
+# Encoders turn at a hand's pace (click_ms): a burst of clicks in one instant can end on different values in two builds
+# of one firmware, whose accelerating encoders see the clicks split between polls by code timing.
+name: tour
+ms: 22000
+click_ms: 250
+steps:
+  - { at: 1500, screenshot: boot }
+  # play: a note, then a four-note chord
+  - { at: 2000, note: C4, vel: 100, hold: 400 }
+  - { at: 2600, note: C4, vel: 90, hold: 900 }
+  - { at: 2600, note: E4, vel: 90, hold: 900 }
+  - { at: 2600, note: G4, vel: 90, hold: 900 }
+  - { at: 2600, note: B4, vel: 90, hold: 900 }
+  - { at: 3200, screenshot: chord }
+  # the four knobs, one after the other (6 + 4 + 5 + 3 clicks, 250 ms apart)
+  - { at: 3800, turn: KNOB1, clicks: 6 }
+  - { at: 5400, turn: KNOB2, clicks: -4 }
+  - { at: 6500, turn: KNOB3, clicks: 5 }
+  - { at: 7900, turn: KNOB4, clicks: -3 }
+  - { at: 8700, note: A4, vel: 110, hold: 300 }
+  - { at: 9100, screenshot: knobs }
+  # the next track and preset, algorithm
+  - { at: 9500, turn: SELECT, clicks: 1 }
+  - { at: 9800, turn: PRESETS, clicks: 2 }
+  - { at: 10400, turn: ALGORITHM, clicks: 1 }
+  - { at: 10700, note: D4, vel: 100, hold: 500 }
+  - { at: 11300, screenshot: track2 }
+  # the pages
+  - { at: 11700, press: FX }
+  - { at: 12000, screenshot: fx }
+  - { at: 12300, press: ENV }
+  - { at: 12600, screenshot: env }
+  - { at: 12900, press: LFO }
+  - { at: 13200, screenshot: lfo }
+  - { at: 13500, press: HOME }
+  # the sequencer: play for a while, with a note on top and the master level moved
+  - { at: 13900, press: PLAY }
+  - { at: 14900, note: F4, vel: 120, hold: 600 }
+  - { at: 15600, pot: 600 }
+  - { at: 16400, screenshot: playing }
+  - { at: 17000, press: PLAY }
+  # save
+  - { at: 17400, press: SAVE }
+  - { at: 18900, press: SAVE }    # 1.5 s after the first: the project page must be open (it opens slowly cycle-accurately)
+  - { at: 21500, screenshot: saved }
+expect:
+  boots: true
+  sound: true

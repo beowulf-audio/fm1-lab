@@ -1,0 +1,48 @@
+# fm1-lab's own CI on Linux: the unit and sandbox tests, the emulator built from vendor/, and a real firmware booted,
+# smoke-tested and brick-tested under bubblewrap. (Building the compiler from source takes 1-2 hours, so the firmware
+# is a published one, hash-checked; the build commands are tested on macOS by npm run test:e2e.)
+name: ci
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: Sandbox (bubblewrap; Ubuntu 24.04 restricts unprivileged user namespaces)
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap libasound2-dev libx11-dev libxkbcommon-dev libxcursor-dev libxrandr-dev libxi-dev pkg-config
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Unit and sandbox tests
+        run: npm test
+      - name: Rust toolchain
+        run: rustup toolchain install 1.95.0 --profile minimal
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .work/target
+            ~/.cargo/registry
+          key: emu-${{ runner.os }}-${{ hashFiles('vendor/fm1-emu/Cargo.lock', 'patches/*.patch', 'tools/setup-emu.sh') }}
+      - name: The emulator (vendor/fm1-emu, patches/)
+        run: tools/setup-emu.sh
+      - name: A published firmware (Dinghy 0.5), hash-checked
+        run: |
+          mkdir -p .work/ci
+          curl -fsSL --proto '=https' -o .work/ci/dinghy-0.5.fwsc https://github.com/zvenson/dinghy/releases/download/v0.5/dinghy-0.5.fwsc
+          echo "139da045ea20eb5e772e7da5242ae2efaa0dcd9b533ac169992f7795a77efb90  .work/ci/dinghy-0.5.fwsc" | sha256sum -c -
+      - name: inspect, run, brick-test, profile (emulator under bubblewrap)
+        run: |
+          node bin/fm1-lab.mjs inspect .work/ci/dinghy-0.5.fwsc
+          node bin/fm1-lab.mjs run .work/ci/dinghy-0.5.fwsc --html .work/ci/run.html
+          node bin/fm1-lab.mjs brick-test .work/ci/dinghy-0.5.fwsc
+          node bin/fm1-lab.mjs compare .work/ci/dinghy-0.5.fwsc .work/ci/dinghy-0.5.fwsc --identical
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: ci-report, path: .work/ci/run.html, if-no-files-found: ignore }

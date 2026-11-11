@@ -1,0 +1,19 @@
+# X0X: program four bass-drum steps on the white keys, start the pattern, check it plays.
+name: x0x play
+ms: 6000
+steps:
+  - { at: 1000, screenshot: boot }
+  - { at: 1200, note: C4, hold: 80 }
+  - { at: 1400, note: G4, hold: 80 }
+  - { at: 1600, note: D5, hold: 80 }
+  - { at: 1800, note: G5, hold: 80 }
+  - { at: 2000, screenshot: programmed }
+  - { at: 2300, press: PLAY }
+  - { at: 4000, screenshot: playing }
+  - { at: 4500, turn: KNOB1, clicks: 5 }
+  - { at: 5800, screenshot: after-knob }
+expect:
+  boots: true
+  sound: true
+  no_clipping: true
+  screen_changes: true

@@ -1,0 +1,53 @@
+diff --git a/crates/fm1-soc/src/lib.rs b/crates/fm1-soc/src/lib.rs
+index e7df9da..7db988e 100644
+--- a/crates/fm1-soc/src/lib.rs
++++ b/crates/fm1-soc/src/lib.rs
+@@ -732,7 +732,7 @@ impl Soc {
+     pub fn set_board(&mut self, board: Board) {
+         self.board = board;
+         self.periph.board = board;
+-        if board == Board::Smk37 {
++        if board == Board::Smk37 && spiflash::jedec_from_env().is_none() {
+             self.flash.jedec = [0xeb, 0x60, 0x14];
+         }
+     }
+diff --git a/crates/fm1-soc/src/spiflash.rs b/crates/fm1-soc/src/spiflash.rs
+index 40f0bbb..7f0d8ba 100644
+--- a/crates/fm1-soc/src/spiflash.rs
++++ b/crates/fm1-soc/src/spiflash.rs
+@@ -17,6 +17,10 @@
+ //! Power cuts (FM1_FLASH_CUT=N): the Nth erase or page program is cut half way (the first
+ //! half of its bytes changed, the rest as before), and nothing after it reaches the chip, as if
+ //! the power went there. With fm1-live's `--flash FILE` the next run boots from what was left.
++//!
++//! Other flash parts (FM1_FLASH_JEDEC=HHHHHH): the JEDEC id the chip reports, e.g. `b36014` for the
++//! UC25HQ80 in newer FM-1 units (same 1 MiB size and commands), to see how a firmware handles them.
++//! It overrides the board's default (`Soc::set_board`).
+ 
+ pub const SPI0_BASE: u32 = 0x11c00;
+ pub const FLASH_SIZE: usize = 1 << 20;
+@@ -47,6 +51,15 @@ pub struct SpiFlash {
+     pub cut_at: Option<u32>,
+ }
+ 
++/// FM1_FLASH_JEDEC: a 3-byte JEDEC id in hex (`b36014`, `0xB36014`), if set and valid.
++pub fn jedec_from_env() -> Option<[u8; 3]> {
++    let v = std::env::var("FM1_FLASH_JEDEC").ok()?;
++    let v = v.trim().trim_start_matches("0x").trim_start_matches("0X");
++    if v.len() != 6 { return None; }
++    let id = u32::from_str_radix(v, 16).ok()?;
++    Some([(id >> 16) as u8, (id >> 8) as u8, id as u8])
++}
++
+ impl SpiFlash {
+     pub fn new() -> Self {
+         Self {
+@@ -59,7 +72,7 @@ impl SpiFlash {
+             addr: 0,
+             wel: false,
+             pending_prog: Vec::new(),
+-            jedec: [0x85, 0x60, 0x14],
++            jedec: jedec_from_env().unwrap_or([0x85, 0x60, 0x14]),
+             trace: std::env::var_os("FM1_FLASH_TRACE").is_some(),
+             changed: None,
+             revision: 0,
