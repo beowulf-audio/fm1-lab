@@ -1,0 +1,31 @@
+# A short tour for a preview of any firmware: what its screen does as it is played (an animated GIF in sweep, later
+# its sound). The same for every firmware, so it shows the default state and a few presets, not everything a firmware
+# can do; a firmware's own preview scenario does better.
+name: preview
+ms: 8500
+click_ms: 150
+steps:
+  - { at: 1500, screenshot: boot }
+  # a chord, then a short melody
+  - { at: 1700, note: C4, vel: 100, hold: 600 }
+  - { at: 1700, note: E4, vel: 100, hold: 600 }
+  - { at: 1700, note: G4, vel: 100, hold: 600 }
+  - { at: 2500, note: A4, vel: 110, hold: 150 }
+  - { at: 2700, note: C5, vel: 110, hold: 150 }
+  - { at: 2900, note: E5, vel: 110, hold: 150 }
+  - { at: 3100, note: D5, vel: 110, hold: 300 }
+  - { at: 3500, screenshot: played }
+  # the sequencer, if it has one
+  - { at: 3700, press: PLAY }
+  - { at: 5200, screenshot: playing }
+  - { at: 5300, press: PLAY }
+  # a few presets, a note on each
+  - { at: 5600, turn: PRESETS, clicks: 1 }
+  - { at: 5800, note: C4, vel: 100, hold: 300 }
+  - { at: 6300, turn: PRESETS, clicks: 1 }
+  - { at: 6500, note: E4, vel: 100, hold: 300 }
+  - { at: 7000, turn: PRESETS, clicks: 1 }
+  - { at: 7200, note: G4, vel: 100, hold: 300 }
+  - { at: 7800, screenshot: presets }
+expect:
+  boots: true

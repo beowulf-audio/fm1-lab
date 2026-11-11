@@ -12,6 +12,7 @@ import { describeSizes } from "../lib/sizes.mjs";
 import { checkPackage, describe } from "../lib/check.mjs";
 import { readPpm, png, diffShare, hasContent } from "../lib/image.mjs";
 import { parseTprof, hotspots } from "../lib/profile.mjs";
+import { gif } from "../lib/gif.mjs";
 
 // ---- scenarios
 test("scenario: notes on the keyboard, and off it", () => {
@@ -190,4 +191,17 @@ test("scenario files: YAML and fm1-base .txt scripts load", () => {
   const b = loadScenario(join(d, "b.txt"));
   assert.equal(b.kind, "fm1-base test script"); assert.equal(b.timed.length, 1); assert.equal(b.steps[0].key, "n3");
   rmSync(d, { recursive: true });
+});
+
+test("gif: an animation, unchanged frames merged, changed rectangles only", () => {
+  const frame = (x) => { const rgb = Buffer.alloc(16 * 16 * 3, 20); if (x != null) for (let y = 4; y < 8; y++) rgb.fill(250, (y * 16 + x) * 3, (y * 16 + x + 2) * 3); return { w: 16, h: 16, rgb }; };
+  const g = gif([frame(null), frame(null), frame(3), frame(3), frame(9)], { delayMs: 100 });
+  assert.equal(g.subarray(0, 6).toString(), "GIF89a"); assert.equal(g[g.length - 1], 0x3b);
+  assert.equal(g.readUInt16LE(6), 16); assert.equal(g.readUInt16LE(8), 16);
+  // image descriptors (0x2c after a graphic control extension 21 f9 04): three distinct frames
+  let n = 0, delays = [];
+  for (let i = 0; i + 8 < g.length; i++) if (g[i] === 0x21 && g[i + 1] === 0xf9 && g[i + 2] === 4) { n++; delays.push(g.readUInt16LE(i + 4)); }
+  assert.equal(n, 3, "5 frames, 3 different"); assert.deepEqual(delays, [20, 20, 10], "repeats lengthen the frame before");
+  assert.ok(g.includes(Buffer.from("NETSCAPE2.0")), "loops");
+  assert.equal(gif([]), null);
 });
