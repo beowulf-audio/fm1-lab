@@ -13,7 +13,7 @@
 //   fm1-lab compare    [SCENARIO.yaml] A.fwsc B.fwsc [--out DIR] [--strict] [--headroom] [--identical]
 // Exit codes (compare): 0 no regression, 1 regression.
 // Exit codes (brick-test): 0 all pass, 1 any fail, 2 any inconclusive/warn/error (none failing).
-import { writeFileSync, mkdirSync } from "node:fs";
+import { writeFileSync, mkdirSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { boot } from "../lib/emu.mjs";
 import { ppmToPng } from "../lib/image.mjs";
@@ -39,7 +39,7 @@ for (const st of [process.stdout, process.stderr]) st.on("error", (e) => { if (e
 const argv = process.argv.slice(2);
 const cmd = argv.shift();
 const opt = (name, def = null) => { const i = argv.indexOf(name); if (i < 0) return def; const v = argv[i + 1]; argv.splice(i, 2); return v; };
-const usage = () => { console.error("usage: fm1-lab setup [--check] [--force] [emu|toolchain|sdk|python ...]\n       fm1-lab build DIR [--profile P] [--release X] [--cmd '...'] [--root DIR] [--out DIR] [--json OUT] [--run]\n       fm1-lab new NAME [--dir PARENT] [--id NN] [--author NAME] [--git-name N --git-email E] [--gh-credential] [--no-build]\n       fm1-lab test [DIR] [--emu] [SCRIPT...]\n       fm1-lab watch [DIR] [--scenario S] [--profile P] [--cmd '...'] [--no-test] [--no-compare]\n       fm1-lab sweep PATH|@LIST... --out DIR [--brick] [--gif] [--jobs N] [--no-audio] [--force]\n       fm1-lab inspect FILE.fwsc...\n       fm1-lab run [SCENARIO.yaml] FILE.fwsc [--out DIR] [--flash puya|uc25|HEX] [--strict] [--html OUT]\n       fm1-lab boot FILE.fwsc [--ms N] [--jedec HEX] [--keys SCRIPT] [--png OUT]\n       fm1-lab brick-test FILE.fwsc... [--ms N] [--json OUT] [--png-dir DIR]\n       fm1-lab profile [SCENARIO.yaml] FILE.fwsc [--syms FILE] [--clocks 180,120,...] [--json OUT] [--html OUT]\n       fm1-lab compare [SCENARIO.yaml] A.fwsc B.fwsc [--out DIR] [--strict] [--headroom] [--identical] [--no-retry] [--html OUT]"); process.exit(64); };
+const usage = () => { console.error("usage: fm1-lab setup [--check] [--force] [emu|toolchain|sdk|python ...]\n       fm1-lab build DIR [--profile P] [--release X] [--cmd '...'] [--root DIR] [--out DIR] [--json OUT] [--run]\n       fm1-lab new NAME [--dir PARENT] [--id NN] [--author NAME] [--git-name N --git-email E] [--gh-credential] [--no-build]\n       fm1-lab test [DIR] [--emu] [SCRIPT...]\n       fm1-lab watch [DIR] [--scenario S] [--profile P] [--cmd '...'] [--no-test] [--no-compare]\n       fm1-lab sweep PATH|@LIST... --out DIR [--brick] [--preview | --gif --m4a] [--tours MAP.json] [--jobs N] [--no-audio] [--force]\n       fm1-lab inspect FILE.fwsc...\n       fm1-lab run [SCENARIO.yaml] FILE.fwsc [--out DIR] [--flash puya|uc25|HEX] [--strict] [--html OUT]\n       fm1-lab boot FILE.fwsc [--ms N] [--jedec HEX] [--keys SCRIPT] [--png OUT]\n       fm1-lab brick-test FILE.fwsc... [--ms N] [--json OUT] [--png-dir DIR]\n       fm1-lab profile [SCENARIO.yaml] FILE.fwsc [--syms FILE] [--clocks 180,120,...] [--json OUT] [--html OUT]\n       fm1-lab compare [SCENARIO.yaml] A.fwsc B.fwsc [--out DIR] [--strict] [--headroom] [--identical] [--no-retry] [--html OUT]"); process.exit(64); };
 const flag = (name) => { const i = argv.indexOf(name); if (i < 0) return false; argv.splice(i, 1); return true; };
 // before a firmware runs: is it a well-formed FM-1 package? (FM-1 Inspect's decoder)
 const preflight = (...files) => {
@@ -114,12 +114,14 @@ if (cmd === "setup") {
     onResult: (r) => { console.log(`${time()}  ${r.ok ? "PASS" : `FAIL at ${r.stage}`}`); if (!r.ok) process.stdout.write("\x07"); },
   });
 } else if (cmd === "sweep") {
-  const out = opt("--out"), jobs = opt("--jobs"), brick = flag("--brick"), gifs = flag("--gif"), noAudio = flag("--no-audio"), force = flag("--force");
+  const out = opt("--out"), jobs = opt("--jobs"), toursFile = opt("--tours"), brick = flag("--brick"), previews = flag("--preview"), gifs = flag("--gif") || previews,
+        m4a = flag("--m4a") || previews, noAudio = flag("--no-audio"), force = flag("--force");
+  const tours = toursFile ? JSON.parse(readFileSync(toursFile, "utf8")) : undefined;
   if (!out || !argv.length) usage();
   const files = collect(argv);
   console.log(`sweep: ${files.length} .fwsc files${brick ? ", with the UC25HQ80 flash test" : ""} -> ${out}`);
   let shown = 0;
-  const r = await sweep(files, { out, jobs: jobs ? +jobs : undefined, brick, gif: gifs, audio: !noAudio, force, onProgress: (p) => {
+  const r = await sweep(files, { out, jobs: jobs ? +jobs : undefined, brick, gif: gifs, m4a, tours, audio: !noAudio, force, onProgress: (p) => {
     if (p.done === p.total || p.done - shown >= 25) { shown = p.done; console.log(`  ${p.done}/${p.total} · ${Math.round(p.seconds)} s${p.reused ? ` · ${p.reused} from earlier` : ""}`); }
   } });
   const s = r.summary;

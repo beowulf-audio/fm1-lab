@@ -43,7 +43,7 @@ node bin/fm1-lab.mjs new NAME [--dir PARENT] [--id NN] [--author NAME] [--git-na
 node bin/fm1-lab.mjs test [DIR] [--emu] [SCRIPT...]
 node bin/fm1-lab.mjs watch [DIR] [--scenario S] [--profile P] [--cmd '...'] [--no-test] [--no-compare]
 node bin/fm1-lab.mjs build DIR [--profile P] [--release X] [--cmd '...'] [--root DIR] [--out DIR] [--json OUT] [--run]
-node bin/fm1-lab.mjs sweep PATH|@LIST... --out DIR [--brick] [--gif] [--jobs N] [--no-audio] [--force]
+node bin/fm1-lab.mjs sweep PATH|@LIST... --out DIR [--brick] [--preview | --gif --m4a] [--tours MAP.json] [--jobs N] [--no-audio] [--force]
 node bin/fm1-lab.mjs inspect FILE.fwsc...
 node bin/fm1-lab.mjs run [SCENARIO.yaml] FILE.fwsc [--out DIR] [--flash puya|uc25|HEX] [--strict] [--html OUT]
 node bin/fm1-lab.mjs profile [SCENARIO.yaml] FILE.fwsc [--syms FILE] [--clocks 180,120,90] [--json OUT] [--html OUT]
@@ -105,9 +105,12 @@ release (`docs/toolchain-review.md`). Third-party projects: review the build cod
 ### sweep
 
 Many firmwares at once: each one checked, booted with the smoke scenario (screenshots, a 3-second sound preview, crashes)
-and with `--brick` the UC25HQ80 flash test, several at a time. With `--gif` each one plays a short tour instead
-(`scenarios/preview.yaml`: a chord, a melody, PLAY, a few presets) and its screen becomes an animated GIF (`lib/gif.mjs`:
-10 frames a second, the firmware's own palette, only what changes stored; typically 10-90 KB). Results are kept per file by SHA-256, so a sweep resumes
+and with `--brick` the UC25HQ80 flash test, several at a time. With `--preview` each one plays a short tour instead
+(`scenarios/preview.yaml`: a chord, a melody, PLAY, a few presets, or the tour `--tours` names for it: `{"SHA-256" or
+"*": {"scenario": "tour.yaml", "source": "tailored"}}`) and gets a preview: its screen as an animated GIF (`lib/gif.mjs`:
+10 frames a second, the firmware's own palette, only what changes stored; typically 10-90 KB, `--gif`) and its sound as
+AAC (`.m4a`, 64 kb/s, about 30-60 KB; needs ffmpeg, `--m4a`). Each preview records its tour (source and hash): when a
+file's tour changes, the next sweep makes its preview again and keeps its flash test. Results are kept per file by SHA-256, so a sweep resumes
 where it stopped, and a file found twice is run once. `OUT/index.html` is a gallery (filter by name, result and flash
 verdict); `OUT/results.json` and `OUT/brick.json` (SHA-256 to verdict, for FM-1 Inspect) are the data.
 
