@@ -1,12 +1,13 @@
-# A short tour for a preview of any firmware: what its screen does as it is played (an animated GIF in sweep, later
-# its sound). The same for every firmware, so it shows the default state and a few presets, not everything a firmware
-# can do; a firmware's own preview scenario does better.
+# A short tour for a preview of any firmware: the same inputs for every one (three keys together, a quick run of keys,
+# PLAY, then PRESETS three times with a key each), its screen as a GIF and its sound. What the inputs do depends on the
+# firmware: a synth plays a chord and a melody, a groovebox may play drums or program steps. So it shows the default
+# state and the first presets, not everything a firmware can do; a tour written for the firmware does better.
 name: preview
 ms: 8500
 click_ms: 150
 steps:
   - { at: 1500, screenshot: boot }
-  # a chord, then a short melody
+  # three keys together (a chord on a synth), then a quick run of keys
   - { at: 1700, note: C4, vel: 100, hold: 600 }
   - { at: 1700, note: E4, vel: 100, hold: 600 }
   - { at: 1700, note: G4, vel: 100, hold: 600 }

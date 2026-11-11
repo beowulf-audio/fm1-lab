@@ -107,7 +107,8 @@ release (`docs/toolchain-review.md`). Third-party projects: review the build cod
 
 Many firmwares at once: each one checked, booted with the smoke scenario (screenshots, a 3-second sound preview, crashes)
 and with `--brick` the UC25HQ80 flash test, several at a time. With `--preview` each one plays a short tour instead
-(`scenarios/preview.yaml`: a chord, a melody, PLAY, a few presets, or the tour `--tours` names for it: `{"SHA-256" or
+(`scenarios/preview.yaml`: the same inputs for every firmware, three keys together, a run of keys, PLAY and a few
+preset changes, whose effect depends on the firmware; or the tour `--tours` names for it: `{"SHA-256" or
 "*": {"scenario": "tour.yaml", "source": "tailored"}}`) and gets a preview: its screen as an animated GIF (`lib/gif.mjs`:
 10 frames a second, the firmware's own palette, only what changes stored; typically 10-90 KB, `--gif`) and its sound as
 AAC (`.m4a`, 64 kb/s, about 30-60 KB; needs ffmpeg, `--m4a`). Each preview records its tour (source and hash): when a
