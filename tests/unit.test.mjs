@@ -205,3 +205,12 @@ test("gif: an animation, unchanged frames merged, changed rectangles only", () =
   assert.ok(g.includes(Buffer.from("NETSCAPE2.0")), "loops");
   assert.equal(gif([]), null);
 });
+
+test("setup: a missing emulator reads as not built (a fresh checkout, CI), not an error", async () => {
+  const prev = process.env.FM1_LAB_EMU;
+  process.env.FM1_LAB_EMU = "/nonexistent/fm1-live";
+  try {
+    const { COMPONENTS } = await import("../lib/setup.mjs");
+    assert.deepEqual(COMPONENTS.emu.check(), { ok: false, detail: "not built" });
+  } finally { if (prev === undefined) delete process.env.FM1_LAB_EMU; else process.env.FM1_LAB_EMU = prev; }
+});
