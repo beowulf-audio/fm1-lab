@@ -26,6 +26,7 @@ test("new: a project that builds, boots, speaks and is committed", { skip }, () 
   const r = lab("new", "e2e", "--dir", T);
   assert.equal(r.code, 0, r.out);
   assert.match(r.out, /BUILT/); assert.match(r.out, /PASS scenarios\/smoke\.yaml.*said "E2E" ok.*no_crash ok/);
+  assert.match(r.out, /PASS both flash chips \(Puya, UC25HQ80\)/, "it saves on the newer flash chip too");
   const git = (...a) => spawnSync("git", ["-C", P, ...a], { encoding: "utf8" }).stdout.trim();
   assert.equal(git("log", "--format=%ae", "-1"), git("config", "--get", "user.email"), "committed with the configured identity");
   assert.equal(git("status", "--short"), "", "everything committed, firmware.json too");
@@ -92,4 +93,5 @@ test("watch: a round passes and compares with the last good build", { skip }, as
   const second = await round(P, {});
   assert.equal(second.ok, true, second.lines.join("\n"));
   assert.ok(second.lines.some((l) => /^compare (same|changed)/.test(l)), second.lines.join("\n"));
+  assert.ok(second.lines.some((l) => /^flash +ok on both chips/.test(l)), "both flash chips every round");
 });

@@ -41,7 +41,7 @@ npm test                            # unit and sandbox tests; npm run test:e2e: 
 node bin/fm1-lab.mjs setup [--check] [--force] [emu|toolchain|sdk|python ...]
 node bin/fm1-lab.mjs new NAME [--dir PARENT] [--id NN] [--author NAME] [--git-name N --git-email E] [--gh-credential] [--no-build]
 node bin/fm1-lab.mjs test [DIR] [--emu] [SCRIPT...]
-node bin/fm1-lab.mjs watch [DIR] [--scenario S] [--profile P] [--cmd '...'] [--no-test] [--no-compare]
+node bin/fm1-lab.mjs watch [DIR] [--scenario S] [--profile P] [--cmd '...'] [--no-test] [--no-flash] [--no-compare]
 node bin/fm1-lab.mjs build DIR [--profile P] [--release X] [--cmd '...'] [--root DIR] [--out DIR] [--json OUT] [--run]
 node bin/fm1-lab.mjs sweep PATH|@LIST... --out DIR [--brick] [--preview | --gif --m4a] [--tours MAP.json] [--jobs N] [--no-audio] [--force]
 node bin/fm1-lab.mjs inspect FILE.fwsc...
@@ -67,7 +67,7 @@ fm1-lab's builds were reviewed and validated with, its template as `app/` (renam
 nothing of JieLi's SDK is linked), a package identity prefix that no firmware in FM-1 Inspect's index uses, an fm1-lab
 scenario, and a git repository with one commit (your configured git identity, or `--git-name`/`--git-email`; no remote;
 `--gh-credential` makes it log in to GitHub through gh). It then
-builds the app in the sandbox, checks the package and runs the scenario: about 5 seconds. A fresh clone of the project
+builds the app in the sandbox, checks the package, runs the scenario and checks both flash chips: about 8 seconds. A fresh clone of the project
 builds a byte-identical package.
 
 ### test
@@ -90,7 +90,8 @@ Bluetooth MIDI device to find, the emulator none).
 ### watch
 
 Rebuilds and retests on every save: the build (sandboxed, with its sizes and what changed since the last build), the
-app's host-simulator tests (fm1-base projects), the scenario in the emulator, and a comparison with the last build that
+app's host-simulator tests (fm1-base projects), the scenario in the emulator, both flash chips (the original and the
+UC25HQ80 in newer units: a build that stops saving on either fails the round), and a comparison with the last build that
 passed; a failed stage shows the compiler's or the check's own message and stops the round. Rounds take 5-15 seconds.
 
 ### build

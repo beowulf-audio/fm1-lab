@@ -4,7 +4,7 @@
 //   fm1-lab build      DIR [--profile P] [--release X] [--cmd "..."] [--root DIR] [--out DIR] [--json OUT] [--run]
 //   fm1-lab new        NAME [--dir PARENT] [--id NN] [--author NAME] [--git-name N --git-email E] [--gh-credential] [--no-build]
 //   fm1-lab test       [DIR] [--emu] [SCRIPT...]   an fm1-base app's tests in its host simulator (--emu: and the emulator)
-//   fm1-lab watch      [DIR] [--scenario S] [--profile P] [--cmd '...'] [--no-test] [--no-compare]
+//   fm1-lab watch      [DIR] [--scenario S] [--profile P] [--cmd '...'] [--no-test] [--no-flash] [--no-compare]
 //   fm1-lab sweep      PATH|@LIST... --out DIR [--brick] [--jobs N] [--no-audio] [--force]
 //   fm1-lab inspect    FILE.fwsc...
 //   fm1-lab boot       FILE.fwsc [--ms 4000] [--jedec b36014] [--keys 'T:PLAY,...'] [--png out.png]
@@ -39,7 +39,7 @@ for (const st of [process.stdout, process.stderr]) st.on("error", (e) => { if (e
 const argv = process.argv.slice(2);
 const cmd = argv.shift();
 const opt = (name, def = null) => { const i = argv.indexOf(name); if (i < 0) return def; const v = argv[i + 1]; argv.splice(i, 2); return v; };
-const usage = () => { console.error("usage: fm1-lab setup [--check] [--force] [emu|toolchain|sdk|python ...]\n       fm1-lab build DIR [--profile P] [--release X] [--cmd '...'] [--root DIR] [--out DIR] [--json OUT] [--run]\n       fm1-lab new NAME [--dir PARENT] [--id NN] [--author NAME] [--git-name N --git-email E] [--gh-credential] [--no-build]\n       fm1-lab test [DIR] [--emu] [SCRIPT...]\n       fm1-lab watch [DIR] [--scenario S] [--profile P] [--cmd '...'] [--no-test] [--no-compare]\n       fm1-lab sweep PATH|@LIST... --out DIR [--brick] [--preview | --gif --m4a] [--tours MAP.json] [--jobs N] [--no-audio] [--force]\n       fm1-lab inspect FILE.fwsc...\n       fm1-lab run [SCENARIO.yaml] FILE.fwsc [--out DIR] [--flash puya|uc25|HEX] [--strict] [--html OUT]\n       fm1-lab boot FILE.fwsc [--ms N] [--jedec HEX] [--keys SCRIPT] [--png OUT]\n       fm1-lab brick-test FILE.fwsc... [--ms N] [--json OUT] [--png-dir DIR]\n       fm1-lab profile [SCENARIO.yaml] FILE.fwsc [--syms FILE] [--clocks 180,120,...] [--json OUT] [--html OUT]\n       fm1-lab compare [SCENARIO.yaml] A.fwsc B.fwsc [--out DIR] [--strict] [--headroom] [--identical] [--no-retry] [--html OUT]"); process.exit(64); };
+const usage = () => { console.error("usage: fm1-lab setup [--check] [--force] [emu|toolchain|sdk|python ...]\n       fm1-lab build DIR [--profile P] [--release X] [--cmd '...'] [--root DIR] [--out DIR] [--json OUT] [--run]\n       fm1-lab new NAME [--dir PARENT] [--id NN] [--author NAME] [--git-name N --git-email E] [--gh-credential] [--no-build]\n       fm1-lab test [DIR] [--emu] [SCRIPT...]\n       fm1-lab watch [DIR] [--scenario S] [--profile P] [--cmd '...'] [--no-test] [--no-flash] [--no-compare]\n       fm1-lab sweep PATH|@LIST... --out DIR [--brick] [--preview | --gif --m4a] [--tours MAP.json] [--jobs N] [--no-audio] [--force]\n       fm1-lab inspect FILE.fwsc...\n       fm1-lab run [SCENARIO.yaml] FILE.fwsc [--out DIR] [--flash puya|uc25|HEX] [--strict] [--html OUT]\n       fm1-lab boot FILE.fwsc [--ms N] [--jedec HEX] [--keys SCRIPT] [--png OUT]\n       fm1-lab brick-test FILE.fwsc... [--ms N] [--json OUT] [--png-dir DIR]\n       fm1-lab profile [SCENARIO.yaml] FILE.fwsc [--syms FILE] [--clocks 180,120,...] [--json OUT] [--html OUT]\n       fm1-lab compare [SCENARIO.yaml] A.fwsc B.fwsc [--out DIR] [--strict] [--headroom] [--identical] [--no-retry] [--html OUT]"); process.exit(64); };
 const flag = (name) => { const i = argv.indexOf(name); if (i < 0) return false; argv.splice(i, 1); return true; };
 // before a firmware runs: is it a well-formed FM-1 package? (FM-1 Inspect's decoder)
 const preflight = (...files) => {
@@ -80,7 +80,9 @@ if (cmd === "setup") {
     const out = join(p.dir, "app", "build", "lab");
     const rr = await runScenario(x.path, loadScenario(p.scenario), { out });
     console.log(`  ${rr.pass ? "PASS" : "FAIL"} scenarios/smoke.yaml: ${rr.checks.map((c) => `${c.name} ${c.ok ? "ok" : "FAIL"}`).join(", ")} · screenshots and audio.wav in ${out}`);
-    process.exitCode = rr.pass ? 0 : 1;
+    const bt = await brickTest(x.path);   // both flash chips
+    console.log(`  ${bt.verdict === "pass" ? "PASS" : bt.verdict.toUpperCase()} both flash chips (Puya, UC25HQ80): ${bt.reason}`);
+    process.exitCode = rr.pass && bt.verdict === "pass" ? 0 : 1;
     console.log(`  first commit ${commitProject(p.dir, p.NAME, p.prefix)} (with the firmware.json the build wrote)`);
   }
   console.log(`\nnext: edit app/app.c, then  cd ${p.dir} && fm1-lab build . --run`);
@@ -103,12 +105,12 @@ if (cmd === "setup") {
   console.log(`${r.ok ? "PASS" : "FAIL"}  ${r.scripts.length} test scripts in the host simulator${emu ? " and on the emulated device" : ""} · ${r.seconds} s · sandboxed`);
   process.exitCode = r.ok ? 0 : 1;
 } else if (cmd === "watch") {
-  const scenario = opt("--scenario"), profile = opt("--profile"), wcmd = opt("--cmd"), noTest = flag("--no-test"), noCompare = flag("--no-compare");
+  const scenario = opt("--scenario"), profile = opt("--profile"), wcmd = opt("--cmd"), noTest = flag("--no-test"), noFlash = flag("--no-flash"), noCompare = flag("--no-compare");
   const dir = argv[0] || ".";
   const time = () => new Date().toTimeString().slice(0, 8);
   console.log(`watching ${dir} · Ctrl-C to stop`);
   watchProject(dir, {
-    scenario: scenario || undefined, profile: profile || undefined, cmd: wcmd || undefined, hostTests: !noTest, compare: !noCompare,
+    scenario: scenario || undefined, profile: profile || undefined, cmd: wcmd || undefined, hostTests: !noTest, flash: !noFlash, compare: !noCompare,
     onRound: (why) => console.log(`\n${time()}  ${why === "start" ? "first round" : `changed: ${why}`}`),
     onLine: (l) => console.log(`  ${l}`),
     onResult: (r) => { console.log(`${time()}  ${r.ok ? "PASS" : `FAIL at ${r.stage}`}`); if (!r.ok) process.stdout.write("\x07"); },
