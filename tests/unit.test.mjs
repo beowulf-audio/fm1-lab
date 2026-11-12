@@ -265,3 +265,26 @@ test("resources: a region in the package itself (entry:TYPE@ADDR), ChoralRoot's 
     assert.throws(() => prepare({ entry: 200, base: 0xfd000 }, pkg), /data area/);
   } finally { rmSync(pkg, { force: true }); }
 });
+
+test("map: where a firmware writes, checked against the flash contract", async () => {
+  const { writesOf, ranges, check } = await import("../lib/flashmap.mjs");
+  const log = ["flash cmd 9f addr 000000 bytes 4", "flash cmd 20 addr 0fc000 bytes 4", "flash cmd 02 addr 0fc000 bytes 260",
+    "flash cmd 0b addr 097000 bytes 37", "flash cmd 20 addr 0a9123 bytes 4", "flash cmd 02 addr 0a9f00 bytes 12"].join("\n");
+  const w = writesOf(log);
+  assert.deepEqual(w.map((x) => [x.op, x.lo, x.hi]), [["erase", 0xfc000, 0xfd000], ["program", 0xfc000, 0xfc100], ["erase", 0xa9000, 0xaa000], ["program", 0xa9f00, 0xa9f08]]);
+  assert.deepEqual(ranges(w).map((r) => [r.lo, r.hi, r.erases, r.programs]), [[0xa9000, 0xaa000, 1, 1], [0xfc000, 0xfd000, 1, 1]]);
+  const img = Buffer.alloc(0x100000, 0xff);
+  let f = check(w, img);
+  assert.ok(!f.some((x) => x.level !== "info"), "settings at 0xFC000 and data at 0xA9000: fine");
+  assert.ok(f.some((x) => /0xFC000\.\.0xFCFFF is also used by settings/.test(x.text)), "shared with others: said");
+  img.write("AT", 0xa9f06, "latin1");
+  f = check(w, img);
+  assert.ok(f.some((x) => x.level === "error" && /0xA9000 has "AT" at 0xF06/.test(x.text)), "an update record's shape: the loader would erase it");
+  img.fill(0xff, 0xa9f00, 0xa9f08); img[0xa9f01] = 0;
+  assert.ok(check(w, img).some((x) => x.level === "warn" && /0xF00\.\.0xF07/.test(x.text)), "data in the scanned bytes: a warning");
+  const bad = writesOf("flash cmd 20 addr 0e8000 bytes 4\nflash cmd 20 addr 0ff000 bytes 4\nflash cmd 20 addr 001000 bytes 4\nflash cmd 20 addr 050000 bytes 4");
+  const e = check(bad, null).filter((x) => x.level === "error").map((x) => x.text).join(" | ");
+  assert.match(e, /radio's factory calibration/); assert.match(e, /key_mac/); assert.match(e, /boot head/); assert.match(e, /app area/);
+  assert.ok(check(writesOf("flash cmd 20 addr 0ea000 bytes 4"), null).some((x) => x.level === "warn" && /USR/.test(x.text)), "the stock patch bank: a warning");
+  assert.ok(check(writesOf("flash cmd 20 addr 0e2000 bytes 4"), null).some((x) => x.level === "warn" && /staging/.test(x.text)), "staging: a warning");
+});

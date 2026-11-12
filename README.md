@@ -48,6 +48,7 @@ node bin/fm1-lab.mjs inspect FILE.fwsc...
 node bin/fm1-lab.mjs run [SCENARIO.yaml] FILE.fwsc [--out DIR] [--flash puya|uc25|HEX] [--resources FILE@0xADDR | entry:TYPE@0xADDR] [--strict] [--html OUT]
 node bin/fm1-lab.mjs profile [SCENARIO.yaml] FILE.fwsc [--syms FILE] [--clocks 180,120,90] [--json OUT] [--html OUT]
 node bin/fm1-lab.mjs compare [SCENARIO.yaml] A.fwsc B.fwsc [--out DIR] [--strict] [--headroom] [--identical] [--no-retry] [--html OUT]
+node bin/fm1-lab.mjs map [SCENARIO.yaml] FILE.fwsc [--ms 8000] [--flash HEX] [--json OUT]
 node bin/fm1-lab.mjs boot FILE.fwsc [--ms 4000] [--jedec b36014] [--keys '1500:OCTUP,1600:OCTUP^'] [--png out.png]
 node bin/fm1-lab.mjs brick-test FILE.fwsc... [--ms 8000] [--json report.json] [--png-dir DIR]
 ```
@@ -64,6 +65,15 @@ only the firmware's own installer writes, at an address in its installer's code.
 alone. ChoralRoot 0.40 carries its factory presets this way (`res2.bin`, type 200, to `0xDC000`); without it the splash
 says "PRESETS MISSING" and every factory preset is a stand-in. The entry is written whole, after its header (`CRES` or
 `CRE2`) is checked.
+
+`map` runs the firmware through input that makes it save (by default two octave presses, then time for an
+autosave; or a scenario) and checks every flash erase and page program against what the FM-1 needs left alone. Errors:
+the boot head (`0x0000..0x3FFF`), the app area (only an installer writes it), the radio's factory calibration at
+`0xE8000`, key_mac (`0xFF000..`), and any data sector below `0xFC000` with `"AT"` at `0xF06`, which the update loader
+takes for an update record and erases on the next install. Warnings: the loader's staging (`0xE0000..0xE4FFF`), BTIF,
+the stock patch bank (USR), data in a sector's bytes `0xF00..0xF07`. Notes: places other firmwares use too (V16's
+longer app, known resource regions and stores, the common settings sector). Only what the run wrote is checked, so give
+it input that saves everything. `watch` runs it every round and stops on an error.
 
 `--html OUT` on `run`, `profile` and `compare` writes a self-contained report: screenshots and audio embedded, charts as inline SVG, no external requests, so it opens straight from a CI artifact.
 

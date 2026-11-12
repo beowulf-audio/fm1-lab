@@ -84,6 +84,12 @@ test("resources: the region in the emulated flash at its address, and run --reso
   assert.equal(lab("run", pkg, "--resources", `${file}@0xF2010`).code, 64, "not a sector: refused before running");
 });
 
+test("map: the template writes only where it may", { skip }, () => {
+  const r = lab("map", join(P, "app", "build", "e2e.fwsc"));
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /^OK /m); assert.doesNotMatch(r.out, /ERROR/);
+});
+
 test("compare: a build against itself is the same", { skip }, () => {
   const pkg = join(P, "app", "build", "e2e.fwsc");
   const r = lab("compare", join(P, "scenarios", "smoke.yaml"), pkg, pkg, "--identical");
@@ -108,4 +114,5 @@ test("watch: a round passes and compares with the last good build", { skip }, as
   assert.equal(second.ok, true, second.lines.join("\n"));
   assert.ok(second.lines.some((l) => /^compare (same|changed)/.test(l)), second.lines.join("\n"));
   assert.ok(second.lines.some((l) => /^flash +ok on both chips/.test(l)), "both flash chips every round");
+  assert.ok(second.lines.some((l) => /^map +(writes|no flash writes)/.test(l)) && !second.lines.some((l) => /^map +ERROR/.test(l)), "where it writes, every round");
 });

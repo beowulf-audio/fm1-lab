@@ -21,6 +21,9 @@ import { loadScenario, SMOKE } from "../lib/scenario.mjs";
 import { runScenario } from "../lib/run.mjs";
 import { parseSpec, prepare } from "../lib/resources.mjs";
 import { brickTest } from "../lib/brick.mjs";
+import { DEFAULT_KEYS } from "../lib/brick.mjs";
+import { flashMap, describe as describeMap } from "../lib/flashmap.mjs";
+import { toKeys } from "../lib/scenario.mjs";
 import { profile } from "../lib/profile.mjs";
 import { compare } from "../lib/compare.mjs";
 import { runReport, profileReport, compareReport } from "../lib/report.mjs";
@@ -40,7 +43,7 @@ for (const st of [process.stdout, process.stderr]) st.on("error", (e) => { if (e
 const argv = process.argv.slice(2);
 const cmd = argv.shift();
 const opt = (name, def = null) => { const i = argv.indexOf(name); if (i < 0) return def; const v = argv[i + 1]; argv.splice(i, 2); return v; };
-const usage = () => { console.error("usage: fm1-lab setup [--check] [--force] [emu|toolchain|sdk|python ...]\n       fm1-lab build DIR [--profile P] [--release X] [--cmd '...'] [--root DIR] [--out DIR] [--json OUT] [--run]\n       fm1-lab new NAME [--dir PARENT] [--id NN] [--author NAME] [--git-name N --git-email E] [--gh-credential] [--no-build]\n       fm1-lab test [DIR] [--emu] [SCRIPT...]\n       fm1-lab watch [DIR] [--scenario S] [--profile P] [--cmd '...'] [--no-test] [--no-flash] [--no-compare]\n       fm1-lab sweep PATH|@LIST... --out DIR [--brick] [--preview | --gif --m4a] [--tours MAP.json] [--jobs N] [--no-audio] [--force]\n       fm1-lab inspect FILE.fwsc...\n       fm1-lab run [SCENARIO.yaml] FILE.fwsc [--out DIR] [--flash puya|uc25|HEX] [--resources FILE@0xADDR | entry:TYPE@0xADDR] [--strict] [--html OUT]\n       fm1-lab boot FILE.fwsc [--ms N] [--jedec HEX] [--keys SCRIPT] [--png OUT]\n       fm1-lab brick-test FILE.fwsc... [--ms N] [--json OUT] [--png-dir DIR]\n       fm1-lab profile [SCENARIO.yaml] FILE.fwsc [--syms FILE] [--clocks 180,120,...] [--json OUT] [--html OUT]\n       fm1-lab compare [SCENARIO.yaml] A.fwsc B.fwsc [--out DIR] [--strict] [--headroom] [--identical] [--no-retry] [--html OUT]"); process.exit(64); };
+const usage = () => { console.error("usage: fm1-lab setup [--check] [--force] [emu|toolchain|sdk|python ...]\n       fm1-lab build DIR [--profile P] [--release X] [--cmd '...'] [--root DIR] [--out DIR] [--json OUT] [--run]\n       fm1-lab new NAME [--dir PARENT] [--id NN] [--author NAME] [--git-name N --git-email E] [--gh-credential] [--no-build]\n       fm1-lab test [DIR] [--emu] [SCRIPT...]\n       fm1-lab watch [DIR] [--scenario S] [--profile P] [--cmd '...'] [--no-test] [--no-flash] [--no-compare]\n       fm1-lab sweep PATH|@LIST... --out DIR [--brick] [--preview | --gif --m4a] [--tours MAP.json] [--jobs N] [--no-audio] [--force]\n       fm1-lab inspect FILE.fwsc...\n       fm1-lab run [SCENARIO.yaml] FILE.fwsc [--out DIR] [--flash puya|uc25|HEX] [--resources FILE@0xADDR | entry:TYPE@0xADDR] [--strict] [--html OUT]\n       fm1-lab map [SCENARIO.yaml] FILE.fwsc [--ms N] [--flash HEX] [--json OUT]\n       fm1-lab boot FILE.fwsc [--ms N] [--jedec HEX] [--keys SCRIPT] [--png OUT]\n       fm1-lab brick-test FILE.fwsc... [--ms N] [--json OUT] [--png-dir DIR]\n       fm1-lab profile [SCENARIO.yaml] FILE.fwsc [--syms FILE] [--clocks 180,120,...] [--json OUT] [--html OUT]\n       fm1-lab compare [SCENARIO.yaml] A.fwsc B.fwsc [--out DIR] [--strict] [--headroom] [--identical] [--no-retry] [--html OUT]"); process.exit(64); };
 const flag = (name) => { const i = argv.indexOf(name); if (i < 0) return false; argv.splice(i, 1); return true; };
 // before a firmware runs: is it a well-formed FM-1 package? (FM-1 Inspect's decoder)
 const preflight = (...files) => {
@@ -169,6 +172,19 @@ if (cmd === "setup") {
   if (pngOut && r.panel) writeFileSync(pngOut, ppmToPng(r.panel));
   console.log(JSON.stringify({ file, ms, jedec: jedec || "856014", exitCode: r.code, flash: r.flash, leds: r.leds, audioPeak: r.audioPeak, wallMs: r.wallMs }, null, 2));
   process.exitCode = r.code === 0 ? 0 : 2;
+} else if (cmd === "map") {
+  // where a firmware writes its flash, checked against the FM-1's flash contract (lib/flashmap.mjs)
+  const jsonOut = opt("--json"), flash = opt("--flash");
+  const [a, b] = argv; if (!a) usage();
+  const [scenPath, fwsc] = b ? [a, b] : [null, a];
+  preflight(fwsc);
+  const sc = scenPath ? loadScenario(scenPath) : null;
+  const ms = Number(opt("--ms", sc ? sc.ms : 8000));
+  const m = await flashMap(fwsc, { ms, keys: sc ? toKeys(sc) : DEFAULT_KEYS, jedec: flash || (sc && sc.flash) || undefined });
+  console.log(`${m.ok ? "OK  " : "FAIL"}  ${basename(fwsc)} · ${sc ? sc.name : "two octave presses, then time to save"} · ${ms} ms`);
+  for (const l of describeMap(m)) console.log(`  ${l}`);
+  if (jsonOut) writeFileSync(jsonOut, JSON.stringify({ tool: "fm1-lab map", date: new Date().toISOString(), firmware: basename(fwsc), ...m }, null, 2));
+  process.exitCode = m.ok ? 0 : 1;
 } else if (cmd === "brick-test") {
   const ms = Number(opt("--ms", 8000)), jsonOut = opt("--json"), pngDir = opt("--png-dir");
   if (!argv.length) usage();
