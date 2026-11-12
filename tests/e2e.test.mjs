@@ -90,6 +90,30 @@ test("map: the template writes only where it may", { skip }, () => {
   assert.match(r.out, /^OK /m); assert.doesNotMatch(r.out, /ERROR/);
 });
 
+test("new --lib: a library as app/lib/NAME, wired into fm1.toml, its tests run by test", { skip }, () => {
+  const lib = join(T, "tinylib");
+  const sh = (cmd, cwd) => spawnSync("sh", ["-c", cmd], { cwd, encoding: "utf8" });
+  for (const d of ["include/tiny", "src", "tests"]) spawnSync("mkdir", ["-p", join(lib, d)]);
+  writeFileSync(join(lib, "include", "tiny", "tiny.h"), "int tiny_twice(int x);\n");
+  writeFileSync(join(lib, "src", "tiny.c"), '#include "tiny/tiny.h"\nint tiny_twice(int x) { return 2 * x; }\n');
+  writeFileSync(join(lib, "tests", "run.sh"), "#!/bin/sh\necho \"FASTMATH=$FASTMATH\"\ntest -f \"$FASTMATH/fastmath.h\" && echo '1 passed, 0 failed'\n");
+  const g = "git -c user.name=e2e -c user.email=e2e@example.invalid";
+  assert.equal(sh(`git init -q -b main && ${g} add -A && ${g} commit -q -m tiny`, lib).status, 0);
+  const r = lab("new", "libby", "--dir", T, "--lib", lib, "--no-build", "--git-name", "e2e", "--git-email", "e2e@example.invalid");
+  assert.equal(r.code, 0, r.out);
+  const proj = join(T, "libby"), toml = readFileSync(join(proj, "app", "fm1.toml"), "utf8");
+  assert.match(toml, /^include = \["lib\/tinylib\/include"\]/m);
+  assert.match(toml, /^o2 = \["lib\/tinylib\/src\/\*\.c"\]/m);
+  const labj = JSON.parse(readFileSync(join(proj, "fm1lab.json"), "utf8"));
+  assert.deepEqual(labj.tests, ["app/lib/tinylib/tests/run.sh"]);
+  assert.equal(labj.libs[0].name, "tinylib");
+  assert.ok(existsSync(join(proj, "app", "lib", "tinylib", "src", "tiny.c")), "the submodule checked out");
+  const t = lab("test", proj);
+  assert.equal(t.code, 0, t.out);
+  assert.match(t.out, /PASS {2}app\/lib\/tinylib\/tests\/run\.sh · 1 checks/, "the library's tests, with fm1-base's fastmath.h");
+  assert.equal(lab("build", proj).code, 0, "the library compiles into the firmware");
+});
+
 test("compare: a build against itself is the same", { skip }, () => {
   const pkg = join(P, "app", "build", "e2e.fwsc");
   const r = lab("compare", join(P, "scenarios", "smoke.yaml"), pkg, pkg, "--identical");

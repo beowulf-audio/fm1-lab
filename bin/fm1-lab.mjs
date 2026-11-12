@@ -43,7 +43,7 @@ for (const st of [process.stdout, process.stderr]) st.on("error", (e) => { if (e
 const argv = process.argv.slice(2);
 const cmd = argv.shift();
 const opt = (name, def = null) => { const i = argv.indexOf(name); if (i < 0) return def; const v = argv[i + 1]; argv.splice(i, 2); return v; };
-const usage = () => { console.error("usage: fm1-lab setup [--check] [--force] [emu|toolchain|sdk|python ...]\n       fm1-lab build DIR [--profile P] [--release X] [--cmd '...'] [--root DIR] [--out DIR] [--json OUT] [--run]\n       fm1-lab new NAME [--dir PARENT] [--id NN] [--author NAME] [--git-name N --git-email E] [--gh-credential] [--no-build]\n       fm1-lab test [DIR] [--emu] [SCRIPT...]\n       fm1-lab watch [DIR] [--scenario S] [--profile P] [--cmd '...'] [--no-test] [--no-flash] [--no-compare]\n       fm1-lab sweep PATH|@LIST... --out DIR [--brick] [--preview | --gif --m4a] [--tours MAP.json] [--jobs N] [--no-audio] [--force]\n       fm1-lab inspect FILE.fwsc...\n       fm1-lab run [SCENARIO.yaml] FILE.fwsc [--out DIR] [--flash puya|uc25|HEX] [--resources FILE@0xADDR | entry:TYPE@0xADDR] [--strict] [--html OUT]\n       fm1-lab map [SCENARIO.yaml] FILE.fwsc [--ms N] [--flash HEX] [--json OUT]\n       fm1-lab boot FILE.fwsc [--ms N] [--jedec HEX] [--keys SCRIPT] [--png OUT]\n       fm1-lab brick-test FILE.fwsc... [--ms N] [--json OUT] [--png-dir DIR]\n       fm1-lab profile [SCENARIO.yaml] FILE.fwsc [--syms FILE] [--clocks 180,120,...] [--json OUT] [--html OUT]\n       fm1-lab compare [SCENARIO.yaml] A.fwsc B.fwsc [--out DIR] [--strict] [--headroom] [--identical] [--no-retry] [--html OUT]"); process.exit(64); };
+const usage = () => { console.error("usage: fm1-lab setup [--check] [--force] [emu|toolchain|sdk|python ...]\n       fm1-lab build DIR [--profile P] [--release X] [--cmd '...'] [--root DIR] [--out DIR] [--json OUT] [--run]\n       fm1-lab new NAME [--dir PARENT] [--id NN] [--author NAME] [--git-name N --git-email E] [--gh-credential] [--lib PATH]... [--no-build]\n       fm1-lab test [DIR] [--emu] [SCRIPT...]\n       fm1-lab watch [DIR] [--scenario S] [--profile P] [--cmd '...'] [--no-test] [--no-flash] [--no-compare]\n       fm1-lab sweep PATH|@LIST... --out DIR [--brick] [--preview | --gif --m4a] [--tours MAP.json] [--jobs N] [--no-audio] [--force]\n       fm1-lab inspect FILE.fwsc...\n       fm1-lab run [SCENARIO.yaml] FILE.fwsc [--out DIR] [--flash puya|uc25|HEX] [--resources FILE@0xADDR | entry:TYPE@0xADDR] [--strict] [--html OUT]\n       fm1-lab map [SCENARIO.yaml] FILE.fwsc [--ms N] [--flash HEX] [--json OUT]\n       fm1-lab boot FILE.fwsc [--ms N] [--jedec HEX] [--keys SCRIPT] [--png OUT]\n       fm1-lab brick-test FILE.fwsc... [--ms N] [--json OUT] [--png-dir DIR]\n       fm1-lab profile [SCENARIO.yaml] FILE.fwsc [--syms FILE] [--clocks 180,120,...] [--json OUT] [--html OUT]\n       fm1-lab compare [SCENARIO.yaml] A.fwsc B.fwsc [--out DIR] [--strict] [--headroom] [--identical] [--no-retry] [--html OUT]"); process.exit(64); };
 const flag = (name) => { const i = argv.indexOf(name); if (i < 0) return false; argv.splice(i, 1); return true; };
 // before a firmware runs: is it a well-formed FM-1 package? (FM-1 Inspect's decoder)
 const preflight = (...files) => {
@@ -69,10 +69,11 @@ if (cmd === "setup") {
 } else if (cmd === "new") {
   const dir = opt("--dir"), id = opt("--id"), author = opt("--author"), gitName = opt("--git-name"), gitEmail = opt("--git-email");
   const noBuild = flag("--no-build"), ghCredential = flag("--gh-credential");
+  const libs = []; for (let v; (v = opt("--lib")) != null;) libs.push(v);
   const name = argv[0]; if (!name) usage();
   let p;
   try { p = await newProject(name, { dir: dir || undefined, id: id || undefined, author: author ?? undefined, gitName: gitName || undefined, gitEmail: gitEmail || undefined,
-                                     ghCredential, commit: noBuild, onStep: (m) => console.log(`  .. ${m}`) }); }
+                                     ghCredential, libs, commit: noBuild, onStep: (m) => console.log(`  .. ${m}`) }); }
   catch (e) { console.error(`fm1-lab new: ${e.message}`); process.exit(2); }
   console.log(`\nNEW    ${p.dir} · ${p.NAME} · identity ${p.prefix} · fm1-base's template on fm1-base's own Bluetooth stack`);
   if (!noBuild) {
@@ -100,14 +101,14 @@ if (cmd === "setup") {
   if (r.stage === "package") { console.log(`FAILED building the package for the emulator · log ${r.build.log}\n${r.build.tail}`); process.exit(1); }
   if (r.hooks.length) console.log(`  note: fm1.toml runs or compiles more of the app's code (${r.hooks.join(", ")}): fine for your own app; read them in anyone else's`);
   for (const t of r.scripts) {
-    console.log(`  ${t.ok ? "PASS" : "FAIL"}  tests/${t.name}.txt · ${t.checks} checks${t.summary ? ` · ${t.summary.replace(/^host:\s*/, "")}` : ""} · output in ${t.out}`);
+    console.log(`  ${t.ok ? "PASS" : "FAIL"}  ${t.label} · ${t.checks} checks${t.summary ? ` · ${t.summary.replace(/^host:\s*/, "")}` : ""}${t.out ? ` · output in ${t.out}` : ""}`);
     for (const f of t.failed.slice(0, 10)) console.log(`        ${f}`);
     if (t.emu) {
       console.log(`  ${t.emu.ok ? "PASS" : "FAIL"}  tests/${t.name}.txt on the emulated device · ${t.emu.checks} checks (${t.emu.simulatorOnly} of the script's lines are simulator-only) · output in ${t.emu.out}`);
       for (const f of t.emu.failed.slice(0, 10)) console.log(`        ${f}`);
     }
   }
-  console.log(`${r.ok ? "PASS" : "FAIL"}  ${r.scripts.length} test scripts in the host simulator${emu ? " and on the emulated device" : ""} · ${r.seconds} s · sandboxed`);
+  console.log(`${r.ok ? "PASS" : "FAIL"}  ${r.scripts.length} test scripts (libraries' included) in the host simulator${emu ? " and on the emulated device" : ""} · ${r.seconds} s · sandboxed`);
   process.exitCode = r.ok ? 0 : 1;
 } else if (cmd === "watch") {
   const scenario = opt("--scenario"), profile = opt("--profile"), wcmd = opt("--cmd"), noTest = flag("--no-test"), noFlash = flag("--no-flash"), noCompare = flag("--no-compare");

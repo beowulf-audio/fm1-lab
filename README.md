@@ -93,12 +93,18 @@ scenario, and a git repository with one commit (your configured git identity, or
 builds the app in the sandbox, checks the package, runs the scenario and checks both flash chips: about 8 seconds. A fresh clone of the project
 builds a byte-identical package.
 
+`--lib PATH` (repeatable) adds a library of your own, a local git repository, as a submodule at `app/lib/NAME`: inside
+the project, so the sandboxed build reads it, fm1-base's register check scans it and its build ID covers it. Its
+`include/` goes into `fm1.toml`'s `include`, its `src/*.c` into `o2` (each an -O2 unit; unused functions are dropped at
+link), and its `tests/run.sh` into `fm1lab.json`'s `tests`.
+
 ### test
 
 An fm1-base app's own tests (`app/tests/*.txt`) in fm1-base's host simulator: the platform and the app compiled for
 your computer and run faster than real time, in the sandbox; keys, knobs, MIDI and reboots, then checks on the app's state, the
 sound's level, MIDI out and what a screen reader says, with screenshots and WAVs. About a second for the template's
-tests. It checks the app's logic, UI and sound; the device's timing, drivers and package are the emulator's (`run`,
+tests. First it runs each script in `fm1lab.json`'s `tests` (a library's own tests, `new --lib`), in the same sandbox, with
+`FASTMATH` set to fm1-base's `include/`: a line `N passed, M failed` is read as its checks. It checks the app's logic, UI and sound; the device's timing, drivers and package are the emulator's (`run`,
 `profile`, `compare`). Review: `docs/fm1-base-review.md`.
 
 `--emu` runs the same scripts on the emulated device too, with the app's real package: fm1-lab translates a script's
