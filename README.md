@@ -75,6 +75,13 @@ the stock patch bank (USR), data in a sector's bytes `0xF00..0xF07`. Notes: plac
 longer app, known resource regions and stores, the common settings sector). Only what the run wrote is checked, so give
 it input that saves everything. `watch` runs it every round and stops on an error.
 
+`--usb-play IN.wav` on `run` (and `usb_play: IN.wav` in a scenario, relative to it) plays a WAV into the firmware's
+USB audio output as a computer would: the emulated host selects the firmware's playback interface, sets 44.1 kHz and
+sends a packet every millisecond (patch 0002). A firmware that takes the computer's audio (fm1-base's `APP_USB_PLAY`,
+an effect or a resynthesizer) can be tested on its real input. Live, `fm1-live --audio-in NAME` does the same with an
+input of your computer (a microphone, or a loopback device such as BlackHole to play a DAW or any app through the
+firmware); `FM1_USB_PLAY=FILE fm1-live --fwsc FW.fwsc` loops a file instead.
+
 `--html OUT` on `run`, `profile` and `compare` writes a self-contained report: screenshots and audio embedded, charts as inline SVG, no external requests, so it opens straight from a CI artifact.
 
 ### setup
@@ -196,7 +203,10 @@ Exit code: 0 all pass, 1 any fail, 2 otherwise. Calibration (`tests/calibration.
 
 fm1-lab vendors **fm1-emu** unmodified at a pinned commit (`vendor/README.md`: provenance and how to upgrade); its Rust
 dependencies come from crates.io, pinned with checksums by its `Cargo.lock`. `patches/0001-fm1-soc-FM1_FLASH_JEDEC.patch`
-adds `FM1_FLASH_JEDEC=HHHHHH` (which flash chip the emulator reports), meant for upstream.
+adds `FM1_FLASH_JEDEC=HHHHHH` (which flash chip the emulator reports), meant for upstream;
+`patches/0002-usb-audio-in-FM1_USB_PLAY-audio-in.patch` adds USB audio into the device (the host side of a playback
+interface: `FM1_USB_PLAY`, `fm1-live --audio-in`). `setup emu` applies them and stops if any file is skipped or left
+unchanged.
 
 `setup toolchain` builds **pi32v2-llvm** (LLVM with a target for the FM-1's CPU) from source at the commits Optimist pins;
 `setup sdk` fetches the three files of JieLi's AC79 SDK (Apache-2.0) that FM-1 packages contain, from JieLi's repository,

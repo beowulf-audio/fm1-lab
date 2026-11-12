@@ -22,6 +22,14 @@ let T, P, CRASH;
 before(() => { T = mkdtempSync(join(tmpdir(), "fm1-lab-e2e-")); P = join(T, "e2e"); CRASH = join(T, "crashy"); });
 after(() => { if (T && !process.env.FM1_LAB_KEEP) rmSync(T, { recursive: true, force: true }); });
 
+test("the emulator was built with fm1-lab's patches (tools/setup-emu.sh)", { skip }, async () => {
+  // (git apply once skipped every file silently inside fm1-lab's own checkout: an emulator without the patches)
+  const { emulatorPath } = await import("../lib/emu.mjs");
+  const bin = readFileSync(emulatorPath()).toString("latin1");
+  assert.ok(bin.includes("FM1_FLASH_JEDEC"), "0001: the flash chip's ID (brick-test's UC25HQ80)");
+  assert.ok(bin.includes("FM1_USB_PLAY") && bin.includes("--audio-in"), "0002: audio into the firmware's USB audio output");
+});
+
 test("new: a project that builds, boots, speaks and is committed", { skip }, () => {
   const r = lab("new", "e2e", "--dir", T);
   assert.equal(r.code, 0, r.out);

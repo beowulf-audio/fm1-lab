@@ -43,7 +43,7 @@ for (const st of [process.stdout, process.stderr]) st.on("error", (e) => { if (e
 const argv = process.argv.slice(2);
 const cmd = argv.shift();
 const opt = (name, def = null) => { const i = argv.indexOf(name); if (i < 0) return def; const v = argv[i + 1]; argv.splice(i, 2); return v; };
-const usage = () => { console.error("usage: fm1-lab setup [--check] [--force] [emu|toolchain|sdk|python ...]\n       fm1-lab build DIR [--profile P] [--release X] [--cmd '...'] [--root DIR] [--out DIR] [--json OUT] [--run]\n       fm1-lab new NAME [--dir PARENT] [--id NN] [--author NAME] [--git-name N --git-email E] [--gh-credential] [--lib PATH]... [--no-build]\n       fm1-lab test [DIR] [--emu] [SCRIPT...]\n       fm1-lab watch [DIR] [--scenario S] [--profile P] [--cmd '...'] [--no-test] [--no-flash] [--no-compare]\n       fm1-lab sweep PATH|@LIST... --out DIR [--brick] [--preview | --gif --m4a] [--tours MAP.json] [--jobs N] [--no-audio] [--force]\n       fm1-lab inspect FILE.fwsc...\n       fm1-lab run [SCENARIO.yaml] FILE.fwsc [--out DIR] [--flash puya|uc25|HEX] [--resources FILE@0xADDR | entry:TYPE@0xADDR] [--strict] [--html OUT]\n       fm1-lab map [SCENARIO.yaml] FILE.fwsc [--ms N] [--flash HEX] [--json OUT]\n       fm1-lab boot FILE.fwsc [--ms N] [--jedec HEX] [--keys SCRIPT] [--png OUT]\n       fm1-lab brick-test FILE.fwsc... [--ms N] [--json OUT] [--png-dir DIR]\n       fm1-lab profile [SCENARIO.yaml] FILE.fwsc [--syms FILE] [--clocks 180,120,...] [--json OUT] [--html OUT]\n       fm1-lab compare [SCENARIO.yaml] A.fwsc B.fwsc [--out DIR] [--strict] [--headroom] [--identical] [--no-retry] [--html OUT]"); process.exit(64); };
+const usage = () => { console.error("usage: fm1-lab setup [--check] [--force] [emu|toolchain|sdk|python ...]\n       fm1-lab build DIR [--profile P] [--release X] [--cmd '...'] [--root DIR] [--out DIR] [--json OUT] [--run]\n       fm1-lab new NAME [--dir PARENT] [--id NN] [--author NAME] [--git-name N --git-email E] [--gh-credential] [--lib PATH]... [--no-build]\n       fm1-lab test [DIR] [--emu] [SCRIPT...]\n       fm1-lab watch [DIR] [--scenario S] [--profile P] [--cmd '...'] [--no-test] [--no-flash] [--no-compare]\n       fm1-lab sweep PATH|@LIST... --out DIR [--brick] [--preview | --gif --m4a] [--tours MAP.json] [--jobs N] [--no-audio] [--force]\n       fm1-lab inspect FILE.fwsc...\n       fm1-lab run [SCENARIO.yaml] FILE.fwsc [--out DIR] [--flash puya|uc25|HEX] [--resources FILE@0xADDR | entry:TYPE@0xADDR] [--usb-play IN.wav] [--strict] [--html OUT]\n       fm1-lab map [SCENARIO.yaml] FILE.fwsc [--ms N] [--flash HEX] [--json OUT]\n       fm1-lab boot FILE.fwsc [--ms N] [--jedec HEX] [--keys SCRIPT] [--png OUT]\n       fm1-lab brick-test FILE.fwsc... [--ms N] [--json OUT] [--png-dir DIR]\n       fm1-lab profile [SCENARIO.yaml] FILE.fwsc [--syms FILE] [--clocks 180,120,...] [--json OUT] [--html OUT]\n       fm1-lab compare [SCENARIO.yaml] A.fwsc B.fwsc [--out DIR] [--strict] [--headroom] [--identical] [--no-retry] [--html OUT]"); process.exit(64); };
 const flag = (name) => { const i = argv.indexOf(name); if (i < 0) return false; argv.splice(i, 1); return true; };
 // before a firmware runs: is it a well-formed FM-1 package? (FM-1 Inspect's decoder)
 const preflight = (...files) => {
@@ -205,7 +205,7 @@ if (cmd === "setup") {
   const v = results.map((r) => r.verdict);
   process.exitCode = v.includes("fail") ? 1 : v.every((x) => x === "pass") ? 0 : 2;
 } else if (cmd === "run") {
-  const out = opt("--out"), flash = opt("--flash"), html = opt("--html"), res = opt("--resources"); const strict = argv.includes("--strict"); if (strict) argv.splice(argv.indexOf("--strict"), 1);
+  const out = opt("--out"), flash = opt("--flash"), html = opt("--html"), res = opt("--resources"); const usbPlay = opt("--usb-play"); const strict = argv.includes("--strict"); if (strict) argv.splice(argv.indexOf("--strict"), 1);
   const [a, b] = argv; if (!a) usage();
   const [scenPath, fwsc] = b ? [a, b] : [null, a];
   const sc = scenPath ? loadScenario(scenPath) : SMOKE;
@@ -213,11 +213,13 @@ if (cmd === "setup") {
   let resources;   // checked before anything runs: the file's header, and the address
   try { if (res) { resources = parseSpec(res); prepare(resources, fwsc); } }
   catch (e) { console.error(e.code === "ENOENT" ? `resources: no file ${resources.file}` : e.message); process.exit(64); }
-  const r = await runScenario(fwsc, sc, { out: out || undefined, strict: strict || undefined, jedec: flash || undefined, resources });
+  const r = await runScenario(fwsc, sc, { out: out || undefined, strict: strict || undefined, jedec: flash || undefined, resources, usbPlay: usbPlay || undefined });
   if (html) writeFileSync(html, runReport(r));
   delete r._raw;
   console.log(`${r.pass ? "PASS" : "FAIL"}  ${r.firmware} · ${r.scenario} · ${r.ms} ms in ${r.wallMs} ms (${r.speed}x real time)`);
   for (const c of r.checks) console.log(`  ${c.ok ? "ok  " : "FAIL"} ${c.name.padEnd(17)} ${c.detail}`);
+  if (r.usbPlay) console.log(r.usbPlay.none ? "  usb play: the firmware has no USB audio output, nothing played" : r.usbPlay.started === false ? "  usb play: the firmware never took its USB audio setting" :
+    `  usb play: ${r.usbPlay.channels} ch x ${r.usbPlay.bytes * 8}-bit at ${r.usbPlay.rate} Hz into the firmware · ${r.usbPlay.packets} packets, ${r.usbPlay.lost} lost`);
   console.log(`  audio: peak ${r.audio.all.peakDb} dBFS, rms ${r.audio.all.rmsDb} dBFS, silent ${Math.round(r.audio.all.silentShare * 100)}% · screen: ${r.screen.distinctFrames} distinct frames · flash: ${r.flashOps.reads} reads, ${r.flashOps.writes} writes`);
   if (out) console.log(`  report files in ${out}`);
   if (html) console.log(`  HTML report: ${html}`);

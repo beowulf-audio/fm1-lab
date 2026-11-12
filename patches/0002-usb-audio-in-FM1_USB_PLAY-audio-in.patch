@@ -1,0 +1,683 @@
+diff --git a/crates/fm1-live/src/main.rs b/crates/fm1-live/src/main.rs
+index f2a9a89..f57fe31 100644
+--- a/crates/fm1-live/src/main.rs
++++ b/crates/fm1-live/src/main.rs
+@@ -106,6 +106,9 @@ struct Opts {
+     flash: Option<String>,
+     /// --usb: a USB cable to this computer (a host; USB-MIDI as a virtual MIDI device)
+     usb: bool,
++    /// --audio-in NAME: this computer's audio input (part of its name, or "default") played to the
++    /// device's USB audio output, as a computer playing through it (implies --usb)
++    audio_in: Option<String>,
+ }
+ 
+ /// The firmware catalog web/firmwares.json as (id, name, version, package path): each package is
+@@ -146,7 +149,7 @@ fn check_opts(o: &Opts) -> Result<(), String> {
+ fn parse_args(a: Vec<String>) -> Option<Opts> {
+     let mut o = Opts { bin: "work/felucca_xip.bin".into(), entry: 0x0200_0120, mhz: 240, bench: None, shot: None,
+                        record: None, lcd_only: false, name: "Felucca".into(), fwsc: None, syx: None, midi: "all".into(), midi_ch: 0,
+-                       flaky_core1: None, cpu1_survives: false, seed: None, flash: None, usb: false };
++                       flaky_core1: None, cpu1_survives: false, seed: None, flash: None, usb: false, audio_in: None };
+     let mut i = 1;
+     while i < a.len() {
+         if a[i] == "--usb" {
+@@ -197,10 +200,15 @@ fn parse_args(a: Vec<String>) -> Option<Opts> {
+             "--cpu1-survives" => { o.cpu1_survives = true; i -= 1; }
+             "--flash" => o.flash = Some(a.get(i + 1)?.clone()),
+             "--record" => o.record = Some(a.get(i + 1)?.clone()),
++            "--audio-in" => o.audio_in = Some(a.get(i + 1)?.clone()),
+             _ => return None,
+         }
+         i += 2;
+     }
++    // audio into the device's USB audio output needs the cable
++    if o.audio_in.is_some() || std::env::var_os("FM1_USB_PLAY").is_some() {
++        o.usb = true;
++    }
+     Some(o)
+ }
+ 
+@@ -350,6 +358,7 @@ fn bench(o: &Opts, ms: u64) {
+         Err(e) => { eprintln!("cannot read {}: {e}", o.bin); std::process::exit(1); },
+     };
+     usb_audio_arm(&mut m);
++    usb_play_arm(&mut m, false, false);
+     if std::env::var("FM1_BENCH_NOKEYS").is_ok() {
+         m.soc.periph.script.clear();
+     } else if script_keys(&mut m) {
+@@ -408,6 +417,7 @@ fn bench(o: &Opts, ms: u64) {
+             for _ in 0..1000 {
+                 if let Err(e) = m.run(97) {
+                     usb_audio_save(&m);
++            usb_play_report(&m);
+                     halted(&e);
+                     std::process::exit(1);
+                 }
+@@ -418,6 +428,7 @@ fn bench(o: &Opts, ms: u64) {
+         }
+         if let Err(e) = m.run(100_000) {
+             usb_audio_save(&m);
++            usb_play_report(&m);
+             halted(&e);
+             std::process::exit(1);
+         }
+@@ -478,6 +489,7 @@ fn bench(o: &Opts, ms: u64) {
+         }
+     }
+     usb_audio_save(&m);
++            usb_play_report(&m);
+     dump_ram(&mut m);
+     if let Ok(path) = std::env::var("FM1_BENCH_PANEL") {
+         let leds = m.soc.periph.led_take();
+@@ -742,6 +754,7 @@ fn shot(o: &Opts, ms: u64) {
+         Err(e) => { eprintln!("cannot read {}: {e}", o.bin); std::process::exit(1); },
+     };
+     usb_audio_arm(&mut m);
++    usb_play_arm(&mut m, false, false);
+     if std::env::var("FM1_NO_SKIP").is_ok() {
+         m.soc.periph.skip_idle = false;
+     }
+@@ -820,6 +833,7 @@ fn shot(o: &Opts, ms: u64) {
+         }
+         if let Err(e) = m.run(100_000) {
+             usb_audio_save(&m);
++            usb_play_report(&m);
+             halted(&e);
+             std::process::exit(1);
+         }
+@@ -836,6 +850,7 @@ fn shot(o: &Opts, ms: u64) {
+                  u.sie_accesses, u.sie_accesses as f64 * u.sie_cycles as f64 * 1000.0 / m.soc.periph.hz as f64,
+                  u.sie_cycles, u.out_packets, u.in_packets);
+         usb_audio_save(&m);
++            usb_play_report(&m);
+     }
+     println!("irq levels at the end: {:?}, ie {}, skipped {} cycles", m.cpu.irq_levels, m.cpu.ie, m.soc.periph.skipped);
+     // (the LEDs' on-fractions from here: the last 40 ms, on either board, recorded or not)
+@@ -845,6 +860,7 @@ fn shot(o: &Opts, ms: u64) {
+         Ok(v) => v,
+         Err(e) => {
+             usb_audio_save(&m);
++            usb_play_report(&m);
+             halted(&e);
+             std::process::exit(1);
+         }
+@@ -954,6 +970,226 @@ fn usb_audio_arm(m: &mut Machine) {
+     }
+ }
+ 
++/// FM1_USB_PLAY=FILE: a WAV file (PCM, 16 or 24 bits, mono or stereo, any rate) as interleaved
++/// 44.1 kHz stereo 16-bit samples (linear interpolation to 44.1 kHz).
++fn read_wav(path: &str) -> Result<Vec<i16>, String> {
++    let b = std::fs::read(path).map_err(|e| e.to_string())?;
++    if b.len() < 12 || &b[0..4] != b"RIFF" || &b[8..12] != b"WAVE" {
++        return Err("not a WAV file".into());
++    }
++    let (mut fmt, mut data, mut i) = (None, None, 12usize);
++    while i + 8 <= b.len() {
++        let n = u32::from_le_bytes([b[i + 4], b[i + 5], b[i + 6], b[i + 7]]) as usize;
++        let body = &b[i + 8..(i + 8 + n).min(b.len())];
++        match &b[i..i + 4] {
++            b"fmt " if body.len() >= 16 => {
++                fmt = Some((u16::from_le_bytes([body[0], body[1]]), u16::from_le_bytes([body[2], body[3]]),
++                            u32::from_le_bytes([body[4], body[5], body[6], body[7]]), u16::from_le_bytes([body[14], body[15]])))
++            }
++            b"data" => data = Some(body),
++            _ => {}
++        }
++        i += 8 + n + (n & 1);
++    }
++    let (tag, ch, rate, bits) = fmt.ok_or("no fmt chunk")?;
++    let data = data.ok_or("no data chunk")?;
++    if !(tag == 1 || tag == 0xfffe) || !(bits == 16 || bits == 24) || !(ch == 1 || ch == 2) || rate == 0 {
++        return Err(format!("PCM 16 or 24 bits, mono or stereo only (this: format {tag}, {ch} ch, {bits} bits)"));
++    }
++    let (bps, ch) = (bits as usize / 8, ch as usize);
++    let frames = data.len() / (bps * ch);
++    if frames == 0 {
++        return Err("no samples".into());
++    }
++    let sample = |f: usize, c: usize| -> f32 {
++        let at = (f * ch + c.min(ch - 1)) * bps;
++        if bps == 2 {
++            i16::from_le_bytes([data[at], data[at + 1]]) as f32
++        } else {
++            (i32::from_le_bytes([0, data[at], data[at + 1], data[at + 2]]) >> 16) as f32
++        }
++    };
++    let out_frames = (frames as u64 * 44_100 / rate as u64) as usize;
++    let step = rate as f64 / 44_100.0;
++    let mut out = Vec::with_capacity(2 * out_frames);
++    for k in 0..out_frames {
++        let x = k as f64 * step;
++        let (f0, t) = (x as usize, (x - x.floor()) as f32);
++        let f1 = (f0 + 1).min(frames - 1);
++        for c in 0..2 {
++            let v = sample(f0, c) + (sample(f1, c) - sample(f0, c)) * t;
++            out.push(v.round().clamp(-32768.0, 32767.0) as i16);
++        }
++    }
++    Ok(out)
++}
++
++/// --usb with FM1_USB_PLAY=FILE (or, live, --audio-in): the computer plays to the device's USB
++/// audio output at 44.1 kHz. Headless, the whole file is queued now (played once, then silence);
++/// live, it is returned for `LiveFeed` to loop. `input`: --audio-in is on (no file needed).
++fn usb_play_arm(m: &mut Machine, live: bool, input: bool) -> Option<Vec<i16>> {
++    if !m.soc.usb.cable {
++        return None;
++    }
++    let file = std::env::var("FM1_USB_PLAY").ok();
++    if file.is_none() && !input {
++        return None;
++    }
++    m.soc.usb.audio_play(44_100);
++    let path = file?;
++    match read_wav(&path) {
++        Ok(lr) => {
++            eprintln!("usb play: {path}, {:.1} s at 44100 Hz{}", lr.len() as f64 / 88_200.0, if live { ", looped" } else { "" });
++            if live {
++                return Some(lr);
++            }
++            m.soc.usb.play_push(&lr);
++            None
++        }
++        Err(e) => {
++            eprintln!("usb play: {path}: {e}");
++            None
++        }
++    }
++}
++
++/// --usb with FM1_USB_PLAY: how the playing went.
++fn usb_play_report(m: &Machine) {
++    let u = &m.soc.usb;
++    if std::env::var_os("FM1_USB_PLAY").is_none() || !u.cable {
++        return;
++    }
++    match &u.play_stream {
++        None => println!("usb play: the device has no USB audio output (playback interface); nothing played"),
++        Some(a) if u.play_packets == 0 => println!("usb play: {} ch x {} B, never started (the device didn't take its setting)", a.channels, a.sample_bytes),
++        Some(a) => println!("usb play: {} ch x {} B at {} Hz, {} packets ({} lost: the device had no room), {} frames of silence (nothing queued), {} frames left",
++                            a.channels, a.sample_bytes, u.play_rate, u.play_packets, u.play_lost, u.play_starved, u.play_queued()),
++    }
++}
++
++/// Live: what the computer plays to the device, kept about 46 ms ahead of the bus: a WAV file
++/// (FM1_USB_PLAY, looped) or this computer's audio input (--audio-in, resampled to 44.1 kHz; when
++/// its clock runs ahead of the emulator's, the oldest input is dropped beyond 200 ms).
++struct LiveFeed {
++    file: Option<(Vec<i16>, usize)>,
++    input: Option<Arc<Mutex<VecDeque<f32>>>>,
++    /// input frames per 44.1 kHz frame
++    step: f64,
++    pos: f64,
++    prev: (f32, f32),
++    next: (f32, f32),
++}
++
++impl LiveFeed {
++    const AHEAD: usize = 2048;
++    fn service(&mut self, m: &mut Machine) {
++        if !m.soc.usb.playing() {
++            if let Some(q) = &self.input {
++                q.lock().unwrap().clear(); // (nothing takes it yet: don't let it pile up)
++            }
++            return;
++        }
++        let mut chunk = Vec::with_capacity(512);
++        while m.soc.usb.play_queued() < Self::AHEAD {
++            chunk.clear();
++            if let Some((lr, at)) = self.file.as_mut() {
++                for _ in 0..512 {
++                    chunk.push(lr[*at]);
++                    *at = (*at + 1) % lr.len();
++                }
++            } else if let Some(q) = &self.input {
++                let mut q = q.lock().unwrap();
++                let keep = (self.step * 44_100.0 * 0.2) as usize;   // 200 ms of input frames
++                if q.len() > 2 * keep {
++                    let drop = (q.len() - 2 * keep) & !1;
++                    q.drain(..drop);
++                }
++                for _ in 0..256 {
++                    let mut starved = false;
++                    self.pos += self.step;
++                    while self.pos >= 1.0 {
++                        if q.len() < 2 {
++                            starved = true;
++                            break;
++                        }
++                        self.pos -= 1.0;
++                        self.prev = self.next;
++                        self.next = (q.pop_front().unwrap(), q.pop_front().unwrap());
++                    }
++                    if starved {
++                        self.pos -= self.step;
++                        break;
++                    }
++                    let t = self.pos as f32;
++                    let l = self.prev.0 + (self.next.0 - self.prev.0) * t;
++                    let r = self.prev.1 + (self.next.1 - self.prev.1) * t;
++                    chunk.push((l * 32767.0).round().clamp(-32768.0, 32767.0) as i16);
++                    chunk.push((r * 32767.0).round().clamp(-32768.0, 32767.0) as i16);
++                }
++            }
++            if chunk.is_empty() {
++                break; // the input has nothing more yet
++            }
++            m.soc.usb.play_push(&chunk);
++            if chunk.len() < 512 && self.file.is_none() {
++                break;
++            }
++        }
++        m.soc.usb.play_trim(4 * Self::AHEAD);
++    }
++}
++
++/// --audio-in NAME: this computer's audio input (part of its name, case-insensitive, or
++/// "default") into `q` as interleaved stereo f32; its name and rate. (macOS asks once for the
++/// microphone permission of the terminal that runs this.)
++fn start_input(name: &str, q: Arc<Mutex<VecDeque<f32>>>) -> Result<(cpal::Stream, String, f64), String> {
++    let host = cpal::default_host();
++    let dev = if name == "default" {
++        host.default_input_device()
++    } else {
++        let want = name.to_lowercase();
++        host.input_devices().map_err(|e| e.to_string())?.find(|d| d.name().is_ok_and(|n| n.to_lowercase().contains(&want)))
++    };
++    let Some(dev) = dev else {
++        let names: Vec<String> = host.input_devices().map(|ds| ds.filter_map(|d| d.name().ok()).collect()).unwrap_or_default();
++        return Err(format!("no audio input matching \"{name}\" (inputs: {})", if names.is_empty() { "none".into() } else { names.join(", ") }));
++    };
++    let dname = dev.name().unwrap_or_default();
++    let cfg = dev.default_input_config().map_err(|e| e.to_string())?;
++    let ch = cfg.channels() as usize;
++    let rate = cfg.sample_rate().0 as f64;
++    let cap = rate as usize;                              // at most a second waiting
++    let err = |e: cpal::StreamError| eprintln!("audio in: {e}");
++    let stream = match cfg.sample_format() {
++        cpal::SampleFormat::F32 => dev.build_input_stream(&cfg.config(), move |data: &[f32], _: &cpal::InputCallbackInfo| {
++            let mut q = q.lock().unwrap();
++            for f in data.chunks(ch) {
++                q.push_back(f[0]);
++                q.push_back(if ch > 1 { f[1] } else { f[0] });
++            }
++            while q.len() > 2 * cap {
++                q.pop_front();
++                q.pop_front();
++            }
++        }, err, None),
++        cpal::SampleFormat::I16 => dev.build_input_stream(&cfg.config(), move |data: &[i16], _: &cpal::InputCallbackInfo| {
++            let mut q = q.lock().unwrap();
++            for f in data.chunks(ch) {
++                q.push_back(f[0] as f32 / 32768.0);
++                q.push_back(if ch > 1 { f[1] } else { f[0] } as f32 / 32768.0);
++            }
++            while q.len() > 2 * cap {
++                q.pop_front();
++                q.pop_front();
++            }
++        }, err, None),
++        f => return Err(format!("input format {f:?} not handled (f32 or i16 only)")),
++    }
++    .map_err(|e| e.to_string())?;
++    stream.play().map_err(|e| e.to_string())?;
++    Ok((stream, dname, rate))
++}
++
+ /// --usb with FM1_USB_WAV=FILE: what the computer recorded from the device's USB audio (the
+ /// samples as sent, interleaved as its channels come, s16le, no header).
+ fn usb_audio_save(m: &Machine) {
+@@ -1201,6 +1437,7 @@ const USAGE: &str = "usage: fm1-live --fwsc FIRMWARE.fwsc   (a firmware package:
+        fm1-live --fw ID | --fw list    (the page's list, in a checkout: node tools/fetch_firmwares.mjs)
+        fm1-live --bin XIP.bin [--entry 0x02000120]
+ options: [--mhz 240] [--syx BANK.syx] [--midi all|none|NAME] [--midi-ch N] [--flash FILE] [--usb]
++         [--audio-in NAME|default]  this computer's audio input into the FM-1's USB audio (implies --usb)
+          [--flaky-core1 RATE [--seed N]] [--cpu1-survives] [--version] [--help]
+ headless: --bench MS   run MS emulated ms as fast as it goes, report the speed
+           --shot MS    run MS ms, then write the panel to work/panel.ppm
+@@ -1228,6 +1465,8 @@ env: FM1_BENCH_KEYS='T:PLAY,T:PLAY^,T:C4@100,T:e0:+3,T:pot:512,T:mHEX'  scripted
+      FM1_USB_SIE_NS=N      --usb: each SIE register access takes N ns (default 1000)
+      FM1_USB_WAV=FILE      --usb, --bench / --shot: record the USB audio as a computer would (s16le, no header);
+                            FM1_USB_RATE=HZ asks for that rate if the device lists it (default 44100)
++     FM1_USB_PLAY=FILE     a computer plays FILE (WAV, 16/24-bit, any rate) to the device's USB audio output at
++                           44.1 kHz (implies --usb): headless once, then silence; in the window looped
+      FM1_LCD_TIMED=1       the LCD's transfers take their time at the SPI clock, as on an FM-1 (a 240 x 240
+                            frame ~77 ms at 12 MHz; by default they finish at once). On with FM1_STRICT too;
+                            FM1_LCD_INSTANT=1 turns it off again
+@@ -1299,6 +1538,24 @@ fn main() {
+     let _midi = midi_inputs(&o, &tx);
+     let (usb_tx, usb_rx) = mpsc::channel::<Vec<u8>>();
+     let usb_on = o.usb;
++    // what the computer plays through the FM-1's USB audio: --audio-in (this computer's input) or
++    // FM1_USB_PLAY (a WAV, looped)
++    let in_q = Arc::new(Mutex::new(VecDeque::<f32>::new()));
++    let (mut _in_stream, mut in_rate) = (None, 44_100.0);
++    if let Some(name) = &o.audio_in {
++        match start_input(name, in_q.clone()) {
++            Ok((st, dname, rate)) => {
++                eprintln!("audio in: \"{dname}\" at {rate} Hz -> the FM-1's USB audio (it plays once the firmware is on the bus)");
++                (_in_stream, in_rate) = (Some(st), rate);
++            }
++            Err(e) => eprintln!("audio in: {e}"),
++        }
++    }
++    let file = usb_play_arm(&mut m, true, _in_stream.is_some());
++    let mut feed = (file.is_some() || _in_stream.is_some()).then(|| LiveFeed {
++        file: file.map(|lr| (lr, 0)), input: _in_stream.is_some().then(|| in_q.clone()),
++        step: in_rate / 44_100.0, pos: 0.0, prev: (0.0, 0.0), next: (0.0, 0.0),
++    });
+ 
+     let audio_ok = _stream.is_some();
+     let emu = {
+@@ -1319,6 +1576,9 @@ fn main() {
+                 if usb_on {
+                     usb_ports.service(&mut m, &usb_rx, &usb_tx);
+                 }
++                if let Some(f) = feed.as_mut() {
++                    f.service(&mut m);
++                }
+                 let real = start.elapsed().as_secs_f64() * 1000.0 - offset_ms;
+                 let emu_ms = m.soc.periph.cycles as f64 * 1000.0 / m.soc.periph.hz as f64;
+                 if real - emu_ms > 250.0 {
+diff --git a/crates/fm1-soc/src/usb.rs b/crates/fm1-soc/src/usb.rs
+index bbeee57..f1837a2 100644
+--- a/crates/fm1-soc/src/usb.rs
++++ b/crates/fm1-soc/src/usb.rs
+@@ -34,6 +34,13 @@
+ //! one isochronous IN transaction a frame, the PCM into `audio`. An isochronous IN
+ //! endpoint (TXCSR2 bit 6) is never NAKed: with no packet queued it sends a zero-length one
+ //! and sets UnderRun (TXCSR1 bit 2), which the firmware clears with its next TXCSR1 write.
++//! USB audio the other way (`audio_play`, fm1-live FM1_USB_PLAY / --audio-in): a USB Audio Class 1
++//! device's playback interface (an audio streaming setting with an isochronous OUT endpoint) is
++//! played to as a computer's audio output does: SET_INTERFACE, SET_CUR of the rate where it has
++//! the control, then one isochronous OUT packet a frame from what the front end queued
++//! (`play_push`, 16-bit stereo): the rate's frames a millisecond (44 or 45 at 44.1 kHz), silence
++//! when nothing is queued. A packet the device hadn't taken the last one before is lost, as on
++//! a real bus (isochronous: no retry). An asynchronous device's feedback endpoint is not read.
+ //! The device only answers at its own address (FADDR), so a firmware that gets SET_ADDRESS
+ //! wrong drops off as it would on a real bus.
+ //!
+@@ -267,6 +274,21 @@ pub struct Usb {
+     pub audio_empty: u64,
+     /// Of those, the ones where the device had nothing queued (UnderRun), not a queued empty one.
+     pub audio_underruns: u64,
++    /// USB audio playback (`audio_play`): the rate asked for, the device's playback stream,
++    /// where starting it is (`play_ctl`: its control transfer under way).
++    play_want: Option<u32>,
++    pub play_stream: Option<AudioStream>,
++    play_step: AudioStep,
++    play_ctl: bool,
++    /// What the computer plays: interleaved 16-bit stereo at `play_rate`, a millisecond a frame.
++    play_q: VecDeque<i16>,
++    pub play_rate: u32,
++    play_acc: u32,
++    /// Isochronous OUT packets sent; those the device hadn't room for (lost); frames sent as
++    /// silence because nothing was queued.
++    pub play_packets: u64,
++    pub play_lost: u64,
++    pub play_starved: u64,
+     pub events: Vec<UsbEvent>,
+     /// FM1_USB_TRACE: the host's transactions on stderr.
+     pub trace: bool,
+@@ -293,6 +315,37 @@ impl Usb {
+         self.audio = std::mem::take(&mut old.audio);
+         (self.audio_rate, self.audio_packets, self.audio_empty, self.audio_underruns) =
+             (old.audio_rate, old.audio_packets, old.audio_empty, old.audio_underruns);
++        // and so does what the computer plays (it starts again once the device is back)
++        self.play_want = old.play_want;
++        self.play_q = std::mem::take(&mut old.play_q);
++        (self.play_packets, self.play_lost, self.play_starved) = (old.play_packets, old.play_lost, old.play_starved);
++    }
++
++    /// Play to the device's USB audio output (if it has one) at `rate` Hz, as a computer's audio
++    /// output would, from when it is configured on: what `play_push` queues.
++    pub fn audio_play(&mut self, rate: u32) {
++        self.play_want = Some(rate);
++    }
++
++    /// Queue interleaved 16-bit stereo samples for the device (at the rate asked for).
++    pub fn play_push(&mut self, lr: &[i16]) {
++        self.play_q.extend(lr.iter().copied());
++    }
++
++    /// Stereo frames queued and not yet sent.
++    pub fn play_queued(&self) -> usize {
++        self.play_q.len() / 2
++    }
++
++    /// Drop queued audio beyond `frames` frames, the oldest first (a live input that runs ahead).
++    pub fn play_trim(&mut self, frames: usize) {
++        let over = self.play_q.len().saturating_sub(2 * frames);
++        self.play_q.drain(..over & !1);
++    }
++
++    /// Playing: the device's stream started.
++    pub fn playing(&self) -> bool {
++        self.play_step == AudioStep::Streaming
+     }
+ 
+     /// Record the device's USB audio (if it has any) at `rate` Hz, as a computer's recording
+@@ -717,6 +770,7 @@ impl Usb {
+                 self.ctl = None;
+                 self.out_q.clear();
+                 self.audio_step = AudioStep::Off;
++                (self.play_step, self.play_ctl) = (AudioStep::Off, false);
+             }
+             return;
+         }
+@@ -742,6 +796,7 @@ impl Usb {
+             HostState::Configured => {
+                 self.midi_frame(dma);
+                 self.audio_frame(dma);
++                self.play_frame(dma);
+             }
+             _ => {}
+         }
+@@ -891,6 +946,13 @@ impl Usb {
+                     self.audio_step = AudioStep::SetInterface;
+                     self.audio_control(AudioStep::SetInterface);
+                 }
++                self.play_stream = find_playback(&self.conf);
++                (self.play_step, self.play_ctl, self.play_acc) = (AudioStep::Off, false, 0);
++                if let (Some(_), Some(a)) = (self.play_want, &self.play_stream) {
++                    self.log(|| format!("audio out: IF {} alt {} ep {:#04x}, {} ch x {} B, {:?} Hz", a.interface, a.alt, a.ep,
++                                        a.channels, a.sample_bytes, a.rates));
++                    self.play_step = AudioStep::SetInterface;   // (its control transfer once the recording's are done)
++                }
+                 return;
+             }
+         };
+@@ -1022,6 +1084,141 @@ impl Usb {
+     }
+ }
+ 
++impl Usb {
++    /// The control transfer of one step of starting the playback stream.
++    fn play_control(&mut self, step: AudioStep) {
++        let Some(a) = self.play_stream.clone() else { return };
++        let rate = self.play_want.unwrap_or(44_100);
++        let (s, out) = match step {
++            AudioStep::SetInterface => ([0x01, 0x0b, a.alt, 0, a.interface, 0, 0, 0], Vec::new()),
++            AudioStep::SetRate => ([0x22, 0x01, 0x00, 0x01, a.ep, 0, 3, 0], rate.to_le_bytes()[..3].to_vec()),
++            _ => return,
++        };
++        self.ctl = Some(Ctl { setup: s, want: out.len(), out, ..Default::default() });
++        self.play_ctl = true;
++    }
++
++    /// The playback's part of a frame: the stream's start (control transfers, after the
++    /// recording's), then one isochronous OUT packet a frame.
++    fn play_frame(&mut self, dma: &mut dyn Dma) {
++        match self.play_step {
++            AudioStep::Off => {}
++            AudioStep::SetInterface | AudioStep::SetRate => {
++                if !self.play_ctl {
++                    if self.ctl.is_some() || matches!(self.audio_step, AudioStep::SetInterface | AudioStep::SetRate) {
++                        return; // another control transfer is under way
++                    }
++                    self.play_control(self.play_step);
++                }
++                let step = self.play_step;
++                match self.control(dma) {
++                    Ok(None) => {}
++                    Ok(Some(_)) => {
++                        self.play_ctl = false;
++                        let rate = self.play_want.unwrap_or(44_100);
++                        let Some(a) = self.play_stream.clone() else { return };
++                        if step == AudioStep::SetInterface && a.rate_control && a.offers(rate) {
++                            self.play_step = AudioStep::SetRate;
++                        } else {
++                            self.play_rate = if step == AudioStep::SetRate { rate } else { a.default_rate() };
++                            self.log(|| format!("audio out: playing at {} Hz", self.play_rate));
++                            self.play_step = AudioStep::Streaming;
++                        }
++                    }
++                    Err(e) if step == AudioStep::SetRate => {
++                        (self.ctl, self.play_ctl) = (None, false);
++                        self.play_rate = self.play_stream.as_ref().map_or(0, |a| a.default_rate());
++                        self.log(|| format!("audio out: SET_CUR: {e}; playing at {} Hz", self.play_rate));
++                        self.play_step = AudioStep::Streaming;
++                    }
++                    Err(e) => {
++                        self.log(|| format!("audio out: {e}"));
++                        (self.ctl, self.play_ctl, self.play_step) = (None, false, AudioStep::Off);
++                    }
++                }
++            }
++            AudioStep::Streaming => {
++                let Some(a) = self.play_stream.clone() else { return };
++                self.play_acc += self.play_rate;
++                let n = (self.play_acc / 1000) as usize;
++                self.play_acc %= 1000;
++                let (ch, sb) = (a.channels.max(1) as usize, a.sample_bytes as usize);
++                let mut data = Vec::with_capacity(n * ch * sb);
++                for _ in 0..n {
++                    let (l, r) = if self.play_q.len() >= 2 {
++                        (self.play_q.pop_front().unwrap(), self.play_q.pop_front().unwrap())
++                    } else {
++                        self.play_starved += 1;
++                        (0, 0)
++                    };
++                    for c in 0..ch {
++                        let v = match (ch, c) { (1, _) => ((l as i32 + r as i32) / 2) as i16, (_, 0) => l, (_, 1) => r, _ => 0 };
++                        if sb == 3 {
++                            data.extend_from_slice(&[0, v as u8, (v >> 8) as u8]); // 24-bit: the 16 bits on top
++                        } else {
++                            data.extend_from_slice(&v.to_le_bytes());
++                        }
++                    }
++                }
++                let addr = self.addr;
++                self.play_packets += 1;
++                if self.dev_out(dma, addr, (a.ep & 0xf) as usize, &data) != Reply::Ack {
++                    self.play_lost += 1;
++                }
++            }
++        }
++    }
++}
++
++/// The playback interface of a configuration (an audio streaming interface, class 1, subclass
++/// 2): the first alternate setting with an isochronous OUT data endpoint (its class-specific
++/// endpoint descriptor follows it), and the Type I format descriptor in it.
++pub fn find_playback(conf: &[u8]) -> Option<AudioStream> {
++    let mut i = 0usize;
++    let (mut cur, mut pending): (Option<AudioStream>, Option<(u8, u16)>) = (None, None);
++    let done = |a: &Option<AudioStream>| a.as_ref().is_some_and(|a| a.ep != 0);
++    while i + 2 <= conf.len() {
++        let (len, ty) = (conf[i] as usize, conf[i + 1]);
++        if len < 2 || i + len > conf.len() {
++            break;
++        }
++        let d = &conf[i..i + len];
++        match ty {
++            4 if len >= 9 => {
++                if done(&cur) {
++                    break;
++                }
++                cur = (d[5] == 1 && d[6] == 2).then(|| AudioStream { interface: d[2], alt: d[3], ..Default::default() });
++                pending = None;
++            }
++            0x24 if len >= 8 && d[2] == 2 && d[3] == 1 => {
++                if let Some(a) = cur.as_mut() {
++                    a.channels = d[4];
++                    a.sample_bytes = d[5];
++                    let n = d[7] as usize;
++                    let at = |k: usize| u32::from(d[k]) | u32::from(d[k + 1]) << 8 | u32::from(d[k + 2]) << 16;
++                    if n == 0 && len >= 14 {
++                        a.rate_range = Some((at(8), at(11)));
++                    } else {
++                        a.rates = (0..n).filter(|k| 8 + 3 * k + 3 <= len).map(|k| at(8 + 3 * k)).collect();
++                    }
++                }
++            }
++            5 if len >= 7 && d[3] & 3 == 1 => {
++                pending = (d[2] & 0x80 == 0 && cur.as_ref().is_some_and(|a| a.ep == 0)).then(|| (d[2], u16::from_le_bytes([d[4], d[5]])));
++            }
++            0x25 if len >= 4 && d[2] == 1 => {
++                if let (Some(a), Some((ep, maxp))) = (cur.as_mut(), pending.take()) {
++                    (a.ep, a.max_packet, a.rate_control) = (ep, maxp, d[3] & 1 != 0);
++                }
++            }
++            _ => pending = None,
++        }
++        i += len;
++    }
++    if done(&cur) { cur } else { None }
++}
++
+ /// The audio streaming interface (class 1, subclass 2) of a configuration: the first
+ /// alternate setting with an isochronous IN data endpoint (one its class-specific endpoint
+ /// descriptor follows: a synch endpoint has none) and no isochronous OUT one (a playback
+@@ -1457,6 +1654,50 @@ mod tests {
+ 
+     /// A configuration whose wTotalLength is too short for one (or 0) fails the enumeration
+     /// instead of reading past it.
++    /// A playback interface: AS alt 1 with an isochronous OUT data endpoint 0x01 (EP_GENERAL with
++    /// the rate control), 2 channels of 16 bits at 44.1 / 48 kHz.
++    fn playback_conf() -> Vec<u8> {
++        let mut c = vec![9, 2, 0, 0, 2, 1, 0, 0x80, 50];
++        c.extend([9, 4, 0, 0, 0, 1, 1, 0, 0]);
++        c.extend([9, 4, 1, 0, 0, 1, 2, 0, 0]);
++        c.extend([9, 4, 1, 1, 1, 1, 2, 0, 0]);
++        c.extend([7, 0x24, 1, 1, 1, 1, 0]);
++        c.extend([14, 0x24, 2, 1, 2, 2, 16, 2, 0x44, 0xac, 0, 0x80, 0xbb, 0]);
++        c.extend([9, 5, 0x01, 0x09, 192, 0, 1, 0, 0]);
++        c.extend([7, 0x25, 1, 1, 0, 0, 0]);
++        let n = c.len();
++        (c[2], c[3]) = (n as u8, (n >> 8) as u8);
++        c
++    }
++
++    #[test]
++    fn a_usb_audio_output_is_played_to() {
++        let conf = playback_conf();
++        let a = find_playback(&conf).expect("a playback stream");
++        assert_eq!((a.interface, a.alt, a.ep, a.channels, a.sample_bytes, a.rate_control), (1, 1, 0x01, 2, 2, true));
++        assert_eq!(a.rates, [44_100, 48_000]);
++        assert_eq!(find_audio(&conf), None, "no recording stream in it");
++        let (mut u, mut fw, mut ram) = device(conf);
++        fw.feed = false;
++        u.audio_play(44_100);
++        let lr: Vec<i16> = (0..2 * 4410).map(|i| (i / 2) as i16).collect();   // 4410 frames, L = R = the frame number
++        u.play_push(&lr);
++        run(&mut u, &mut fw, &mut ram, 600);
++        assert!(u.playing(), "streaming");
++        assert_eq!(fw.alt, 1, "SET_INTERFACE to the playback setting");
++        assert_eq!(fw.rate, 44_100, "SET_CUR of the rate");
++        assert_eq!(u.play_rate, 44_100);
++        let got: Vec<i16> = fw.got.chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]])).collect();
++        assert!(got.len() >= 2 * 4410, "every queued frame went: {} samples", got.len());
++        assert_eq!(&got[..2 * 4410], &lr[..], "in order, nothing lost");
++        assert_eq!(u.play_lost, 0);
++        assert!(u.play_starved > 0, "then silence, counted");
++        assert!(got[2 * 4410..].iter().all(|&s| s == 0), "silence after");
++        // 44.1 frames a millisecond: 441 frames in 10 packets
++        let frames_per = |p: u64| (p * 44_100 / 1000) as usize;
++        assert_eq!(got.len() / 2, frames_per(u.play_packets));
++    }
++
+     #[test]
+     fn a_short_configuration_fails_the_enumeration() {
+         for total in [0u16, 4, 8] {

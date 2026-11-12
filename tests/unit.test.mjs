@@ -288,3 +288,18 @@ test("map: where a firmware writes, checked against the flash contract", async (
   assert.ok(check(writesOf("flash cmd 20 addr 0ea000 bytes 4"), null).some((x) => x.level === "warn" && /USR/.test(x.text)), "the stock patch bank: a warning");
   assert.ok(check(writesOf("flash cmd 20 addr 0e2000 bytes 4"), null).some((x) => x.level === "warn" && /staging/.test(x.text)), "staging: a warning");
 });
+
+test("usb_play: a scenario's WAV for the firmware's USB audio, and the emulator's report of it", async () => {
+  const { parseLog } = await import("../lib/emu.mjs");
+  const d = mkdtempSync(join(tmpdir(), "fm1-lab-usbplay-"));
+  try {
+    writeFileSync(join(d, "s.yaml"), "name: u\nms: 3000\nusb_play: media/in.wav\nsteps:\n  - { at: 1000, press: PLAY }\n");
+    const sc = loadScenario(join(d, "s.yaml"));
+    assert.equal(sc.usbPlay, join(d, "media", "in.wav"), "relative to the scenario");
+    assert.equal(sc.usb, true, "the cable comes with it");
+  } finally { rmSync(d, { recursive: true, force: true }); }
+  assert.deepEqual(parseLog("usb play: 2 ch x 2 B at 44100 Hz, 3554 packets (0 lost: the device had no room), 24431 frames of silence (nothing queued), 0 frames left\n").usbPlay,
+                   { channels: 2, bytes: 2, rate: 44100, packets: 3554, lost: 0, silentFrames: 24431 });
+  assert.deepEqual(parseLog("usb play: the device has no USB audio output (playback interface); nothing played\n").usbPlay, { none: true });
+  assert.equal(parseLog("nothing\n").usbPlay, null);
+});
