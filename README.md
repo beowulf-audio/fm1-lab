@@ -45,12 +45,19 @@ node bin/fm1-lab.mjs watch [DIR] [--scenario S] [--profile P] [--cmd '...'] [--n
 node bin/fm1-lab.mjs build DIR [--profile P] [--release X] [--cmd '...'] [--root DIR] [--out DIR] [--json OUT] [--run]
 node bin/fm1-lab.mjs sweep PATH|@LIST... --out DIR [--brick] [--preview | --gif --m4a] [--tours MAP.json] [--jobs N] [--no-audio] [--force]
 node bin/fm1-lab.mjs inspect FILE.fwsc...
-node bin/fm1-lab.mjs run [SCENARIO.yaml] FILE.fwsc [--out DIR] [--flash puya|uc25|HEX] [--strict] [--html OUT]
+node bin/fm1-lab.mjs run [SCENARIO.yaml] FILE.fwsc [--out DIR] [--flash puya|uc25|HEX] [--resources FILE@0xADDR] [--strict] [--html OUT]
 node bin/fm1-lab.mjs profile [SCENARIO.yaml] FILE.fwsc [--syms FILE] [--clocks 180,120,90] [--json OUT] [--html OUT]
 node bin/fm1-lab.mjs compare [SCENARIO.yaml] A.fwsc B.fwsc [--out DIR] [--strict] [--headroom] [--identical] [--no-retry] [--html OUT]
 node bin/fm1-lab.mjs boot FILE.fwsc [--ms 4000] [--jedec b36014] [--keys '1500:OCTUP,1600:OCTUP^'] [--png out.png]
 node bin/fm1-lab.mjs brick-test FILE.fwsc... [--ms 8000] [--json report.json] [--png-dir DIR]
 ```
+
+`--resources FILE@0xADDR` on `run` (and `resources` in a sweep's tour map) puts a firmware's resource region in the
+emulated flash before it starts. Some firmwares (fm1-base's `resources =`, Melodee) keep data outside the package in a
+region their installer writes after the update, released as `NAME-res.bin` beside the `.fwsc`. Without it they start as
+an FM-1 where that step never ran (Polly: "STYLES MISSING"). The address is the app's own (fm1-base: `APP_RES_BASE` in
+`app/app.h`) and is in no release file. The file's header (`RES1` or `MRS1`, with its CRC-32s) is checked first, and the
+run boots once more to lay the package out.
 
 `--html OUT` on `run`, `profile` and `compare` writes a self-contained report: screenshots and audio embedded, charts as inline SVG, no external requests, so it opens straight from a CI artifact.
 

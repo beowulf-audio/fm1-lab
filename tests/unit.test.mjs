@@ -13,6 +13,8 @@ import { checkPackage, describe } from "../lib/check.mjs";
 import { readPpm, png, diffShare, hasContent } from "../lib/image.mjs";
 import { parseTprof, hotspots } from "../lib/profile.mjs";
 import { gif } from "../lib/gif.mjs";
+import { parseSpec, checkRegion, checkBase } from "../lib/resources.mjs";
+import { crc32 } from "node:zlib";
 
 // ---- scenarios
 test("scenario: notes on the keyboard, and off it", () => {
@@ -213,4 +215,22 @@ test("setup: a missing emulator reads as not built (a fresh checkout, CI), not a
     const { COMPONENTS } = await import("../lib/setup.mjs");
     assert.deepEqual(COMPONENTS.emu.check(), { ok: false, detail: "not built" });
   } finally { if (prev === undefined) delete process.env.FM1_LAB_EMU; else process.env.FM1_LAB_EMU = prev; }
+});
+
+test("resources: FILE@ADDR, the region's header checked, where it may go", () => {
+  assert.deepEqual(parseSpec("b/polly-res.bin@0xAB000"), { file: "b/polly-res.bin", base: 0xab000 });
+  assert.throws(() => parseSpec("polly-res.bin"), /FILE@0xADDR/);
+  const region = (magic, payload) => { const h = Buffer.alloc(32); h.writeUInt32LE(magic, 0); h.writeUInt32LE(payload.length, 4);
+    h.writeUInt32LE(crc32(payload) >>> 0, 8); h.writeUInt32LE(crc32(h.subarray(0, 28)) >>> 0, 28); return Buffer.concat([h, payload]); };
+  const p = Buffer.from("styles and drums");
+  assert.deepEqual(checkRegion(region(0x31534552, p)), { kind: "RES1 (fm1-base)", length: 48 });
+  assert.equal(checkRegion(Buffer.concat([region(0x3153524d, p), Buffer.alloc(100, 0xff)])).length, 48, "Melodee's, padded");
+  assert.throws(() => checkRegion(region(0x12345678, p)), /not a resource region/);
+  const bad = region(0x31534552, p); bad[40] ^= 1; assert.throws(() => checkRegion(bad), /damaged/);
+  const head = region(0x31534552, p); head[12] = 1; assert.throws(() => checkRegion(head), /header/);
+  assert.throws(() => checkRegion(region(0x31534552, p).subarray(0, 40)), /cut short/);
+  checkBase(0xab000, 43032); checkBase(0xcb000, 53876);
+  assert.throws(() => checkBase(0xab010, 100), /sector/);
+  assert.throws(() => checkBase(0x10000, 100), /data area/);
+  assert.throws(() => checkBase(0xfe000, 0x2000), /data area/);
 });

@@ -70,6 +70,20 @@ test("a crash: found, named, and a regression in compare", { skip }, () => {
   assert.equal(c.code, 1, c.out); assert.match(c.out, /REGRESSION[\s\S]*check "no_crash" passes on A, fails on B/);
 });
 
+test("resources: the region in the emulated flash at its address, and run --resources boots with it", { skip }, async () => {
+  const { chipWith } = await import("../lib/resources.mjs");
+  const { crc32 } = await import("node:zlib");
+  const pkg = join(P, "app", "build", "e2e.fwsc"), payload = Buffer.alloc(6000, 0x5a), h = Buffer.alloc(32);
+  h.writeUInt32LE(0x31534552, 0); h.writeUInt32LE(payload.length, 4); h.writeUInt32LE(crc32(payload) >>> 0, 8); h.writeUInt32LE(crc32(h.subarray(0, 28)) >>> 0, 28);
+  const file = join(T, "e2e-res.bin"); writeFileSync(file, Buffer.concat([h, payload]));
+  const chip = readFileSync(await chipWith(pkg, { file, base: 0xf2000 }));
+  assert.equal(chip.length, 0x100000);
+  assert.ok(chip.subarray(0xf2000, 0xf2000 + 6032).equals(Buffer.concat([h, payload])), "the region at its address");
+  const r = lab("run", pkg, "--resources", `${file}@0xF2000`);
+  assert.equal(r.code, 0, r.out);
+  assert.equal(lab("run", pkg, "--resources", `${file}@0xF2010`).code, 64, "not a sector: refused before running");
+});
+
 test("compare: a build against itself is the same", { skip }, () => {
   const pkg = join(P, "app", "build", "e2e.fwsc");
   const r = lab("compare", join(P, "scenarios", "smoke.yaml"), pkg, pkg, "--identical");
