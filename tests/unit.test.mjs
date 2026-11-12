@@ -1,5 +1,6 @@
 // fm1-lab's unit tests: fast, no emulator, no build. node --test tests/unit.test.mjs (npm test)
 import { test } from "node:test";
+import { spawnSync } from "node:child_process";
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -302,4 +303,27 @@ test("usb_play: a scenario's WAV for the firmware's USB audio, and the emulator'
                    { channels: 2, bytes: 2, rate: 44100, packets: 3554, lost: 0, silentFrames: 24431 });
   assert.deepEqual(parseLog("usb play: the device has no USB audio output (playback interface); nothing played\n").usbPlay, { none: true });
   assert.equal(parseLog("nothing\n").usbPlay, null);
+});
+
+test("play: a project's package in the window, with a WAV, the microphone or an input over USB", async () => {
+  const { playCommand, packageOf } = await import("../lib/play.mjs");
+  const d = mkdtempSync(join(tmpdir(), "fm1-lab-play-"));
+  try {
+    writeFileSync(join(d, "fm1lab.json"), JSON.stringify({ package: "app/build/x.fwsc" }));
+    assert.throws(() => packageOf(d), /isn't built yet/);
+    spawnSync("mkdir", ["-p", join(d, "app", "build")]);
+    writeFileSync(join(d, "app", "build", "x.fwsc"), "");
+    writeFileSync(join(d, "in.wav"), "");
+    const dir = process.env.FM1_LAB_EMU; process.env.FM1_LAB_EMU = process.execPath;   // (any file: not run here)
+    try {
+      let c = playCommand({ target: d, wav: join(d, "in.wav") });
+      assert.equal(c.env.FM1_USB_PLAY, join(d, "in.wav"));
+      assert.ok(c.args.includes("--usb") && c.args.includes("--flash"), "the cable, and a flash kept between plays");
+      c = playCommand({ target: d, mic: true, fresh: true });
+      assert.deepEqual(c.args.slice(-2), ["--audio-in", "default"]);
+      assert.ok(!c.args.includes("--flash"), "--fresh: a fresh flash");
+      assert.throws(() => playCommand({ target: d, mic: true, audioIn: "BlackHole" }), /one audio input/);
+      assert.throws(() => playCommand({ target: join(d, "in.wav") }), /not a .fwsc/);
+    } finally { if (dir === undefined) delete process.env.FM1_LAB_EMU; else process.env.FM1_LAB_EMU = dir; }
+  } finally { rmSync(d, { recursive: true, force: true }); }
 });

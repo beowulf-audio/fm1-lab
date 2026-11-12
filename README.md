@@ -105,6 +105,19 @@ the project, so the sandboxed build reads it, fm1-base's register check scans it
 `include/` goes into `fm1.toml`'s `include`, its `src/*.c` into `o2` (each an -O2 unit; unused functions are dropped at
 link), and its `tests/run.sh` into `fm1lab.json`'s `tests`.
 
+### play
+
+    fm1-lab play [DIR | FILE.fwsc] [IN.wav | --mic | --audio-in NAME] [--midi NAME|none] [--fresh]
+
+The firmware in the emulator's window, to play by hand: the panel on screen, the sound out of your speakers, your
+computer keyboard (`A W S E D F…` the keys, `A` = C4; `1`-`0`, `Space`, `R`, `Z`, `X` the buttons; the arrows SELECT and
+ALGORITHM) and the mouse for the controls, and your MIDI inputs. DIR is a project (its built package; default the
+current directory). With audio in, the computer plays into the firmware's USB audio output as a Mac or a phone would
+(patch 0002): a WAV looped, your microphone (`--mic`; macOS asks once for the terminal's microphone permission), or any
+input whose name has NAME (`--audio-in BlackHole`: a loopback device plays any app into it). What the firmware saves
+is kept between plays (`.work/play/`), unless `--fresh`. The window runs outside the sandbox (it needs the screen and
+the audio devices); the firmware itself only runs inside the emulator.
+
 ### test
 
 An fm1-base app's own tests (`app/tests/*.txt`) in fm1-base's host simulator: the platform and the app compiled for
