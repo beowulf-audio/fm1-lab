@@ -45,7 +45,7 @@ node bin/fm1-lab.mjs watch [DIR] [--scenario S] [--profile P] [--cmd '...'] [--n
 node bin/fm1-lab.mjs build DIR [--profile P] [--release X] [--cmd '...'] [--root DIR] [--out DIR] [--json OUT] [--run]
 node bin/fm1-lab.mjs sweep PATH|@LIST... --out DIR [--brick] [--preview | --gif --m4a] [--tours MAP.json] [--jobs N] [--no-audio] [--force]
 node bin/fm1-lab.mjs inspect FILE.fwsc...
-node bin/fm1-lab.mjs run [SCENARIO.yaml] FILE.fwsc [--out DIR] [--flash puya|uc25|HEX] [--resources FILE@0xADDR] [--strict] [--html OUT]
+node bin/fm1-lab.mjs run [SCENARIO.yaml] FILE.fwsc [--out DIR] [--flash puya|uc25|HEX] [--resources FILE@0xADDR | entry:TYPE@0xADDR] [--strict] [--html OUT]
 node bin/fm1-lab.mjs profile [SCENARIO.yaml] FILE.fwsc [--syms FILE] [--clocks 180,120,90] [--json OUT] [--html OUT]
 node bin/fm1-lab.mjs compare [SCENARIO.yaml] A.fwsc B.fwsc [--out DIR] [--strict] [--headroom] [--identical] [--no-retry] [--html OUT]
 node bin/fm1-lab.mjs boot FILE.fwsc [--ms 4000] [--jedec b36014] [--keys '1500:OCTUP,1600:OCTUP^'] [--png out.png]
@@ -58,6 +58,12 @@ region their installer writes after the update, released as `NAME-res.bin` besid
 an FM-1 where that step never ran (Polly: "STYLES MISSING"). The address is the app's own (fm1-base: `APP_RES_BASE` in
 `app/app.h`) and is in no release file. The file's header (`RES1` or `MRS1`, with its CRC-32s) is checked first, and the
 run boots once more to lay the package out.
+
+`--resources entry:TYPE@0xADDR` takes the region from the package itself: an entry of its own beside `flash.bin` that
+only the firmware's own installer writes, at an address in its installer's code. The emulator lays out `flash.bin`
+alone. ChoralRoot 0.40 carries its factory presets this way (`res2.bin`, type 200, to `0xDC000`); without it the splash
+says "PRESETS MISSING" and every factory preset is a stand-in. The entry is written whole, after its header (`CRES` or
+`CRE2`) is checked.
 
 `--html OUT` on `run`, `profile` and `compare` writes a self-contained report: screenshots and audio embedded, charts as inline SVG, no external requests, so it opens straight from a CI artifact.
 

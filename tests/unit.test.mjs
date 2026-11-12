@@ -234,3 +234,34 @@ test("resources: FILE@ADDR, the region's header checked, where it may go", () =>
   assert.throws(() => checkBase(0x10000, 100), /data area/);
   assert.throws(() => checkBase(0xfe000, 0x2000), /data area/);
 });
+
+test("resources: a region in the package itself (entry:TYPE@ADDR), ChoralRoot's 64-byte header", async () => {
+  const { packageEntry, prepare } = await import("../lib/resources.mjs");
+  assert.deepEqual(parseSpec("entry:200@0xDC000"), { entry: 200, base: 0xdc000 });
+  // ChoralRoot's region header (cr_res.h): magic, format, the data's length and CRC-32, ... its own CRC-32 at +60
+  const cr = (magic, data) => { const h = Buffer.alloc(64); h.writeUInt32LE(magic, 0); h.writeUInt32LE(1, 4); h.writeUInt32LE(data.length, 8);
+    h.writeUInt32LE(crc32(data) >>> 0, 12); h.writeUInt32LE(crc32(h.subarray(0, 60)) >>> 0, 60); return Buffer.concat([h, data]); };
+  const d = Buffer.from("factory presets and kerning");
+  assert.deepEqual(checkRegion(cr(0x32455243, d)), { kind: "CRE2 (ChoralRoot's second)", length: 64 + d.length });
+  const bad = cr(0x53455243, d); bad[70] ^= 1; assert.throws(() => checkRegion(bad), /damaged/);
+  const head = cr(0x53455243, d); head[20] = 1; assert.throws(() => checkRegion(head), /header/);
+  // a package (fm1pkg_make.py ufw): 20 header blocks with a marker byte after each 0x2F, then the rest; the header and
+  // each 0x50-byte entry masked (CRC-16 stream from 0xFFFF)
+  const mask = (b) => { let k = 0xffff; for (let i = 0; i < b.length; i++) { b[i] ^= k & 0xff; k = ((k << 1) ^ (k & 0x8000 ? 0x1021 : 0)) & 0xffff; } return b; };
+  const region = Buffer.concat([cr(0x32455243, d), Buffer.alloc(0x4000 - 64 - d.length, 0xff)]);
+  const flash = Buffer.alloc(0x1000, 0xaa), files = [[0, flash], [200, region]];
+  const stream = Buffer.alloc(0x400 + flash.length + region.length + 0x200, 0xaa);
+  const hdr = Buffer.alloc(0x40); hdr.writeUInt16LE(files.length, 8); stream.set(mask(hdr), 0);
+  let off = 0x400;
+  files.forEach(([type, data], i) => { const e = Buffer.alloc(0x50); e.writeUInt16LE(type, 0); e.writeUInt32LE(off, 8); e.writeUInt32LE(data.length, 12);
+    stream.set(mask(e), 0x40 + i * 0x50); stream.set(data, off); off = (off + data.length + 0xff) & ~0xff; });
+  const parts = []; for (let i = 0; i < 20; i++) parts.push(stream.subarray(i * 0x2f, (i + 1) * 0x2f), Buffer.from([i + 1]));
+  const pkg = join(tmpdir(), `fm1-lab-entry-${process.pid}.fwsc`);
+  writeFileSync(pkg, Buffer.concat([...parts, stream.subarray(20 * 0x2f)]));
+  try {
+    assert.ok(packageEntry(pkg, 200).equals(region), "the entry, byte for byte");
+    assert.throws(() => packageEntry(pkg, 201), /no entry of type 201/);
+    assert.equal(prepare({ entry: 200, base: 0xdc000 }, pkg).length, 0x4000, "an entry is written whole, as its installer does");
+    assert.throws(() => prepare({ entry: 200, base: 0xfd000 }, pkg), /data area/);
+  } finally { rmSync(pkg, { force: true }); }
+});
