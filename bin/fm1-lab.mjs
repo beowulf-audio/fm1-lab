@@ -24,6 +24,7 @@ import { brickTest } from "../lib/brick.mjs";
 import { DEFAULT_KEYS } from "../lib/brick.mjs";
 import { flashMap, describe as describeMap } from "../lib/flashmap.mjs";
 import { playCommand, playFirmware } from "../lib/play.mjs";
+import { AUDIO_EXT } from "../lib/audiofile.mjs";
 import { toKeys } from "../lib/scenario.mjs";
 import { profile } from "../lib/profile.mjs";
 import { compare } from "../lib/compare.mjs";
@@ -44,7 +45,7 @@ for (const st of [process.stdout, process.stderr]) st.on("error", (e) => { if (e
 const argv = process.argv.slice(2);
 const cmd = argv.shift();
 const opt = (name, def = null) => { const i = argv.indexOf(name); if (i < 0) return def; const v = argv[i + 1]; argv.splice(i, 2); return v; };
-const usage = () => { console.error("usage: fm1-lab setup [--check] [--force] [emu|toolchain|sdk|python ...]\n       fm1-lab build DIR [--profile P] [--release X] [--cmd '...'] [--root DIR] [--out DIR] [--json OUT] [--run]\n       fm1-lab new NAME [--dir PARENT] [--id NN] [--author NAME] [--git-name N --git-email E] [--gh-credential] [--lib PATH]... [--no-build]\n       fm1-lab test [DIR] [--emu] [SCRIPT...]\n       fm1-lab watch [DIR] [--scenario S] [--profile P] [--cmd '...'] [--no-test] [--no-flash] [--no-compare]\n       fm1-lab sweep PATH|@LIST... --out DIR [--brick] [--preview | --gif --m4a] [--tours MAP.json] [--jobs N] [--no-audio] [--force]\n       fm1-lab inspect FILE.fwsc...\n       fm1-lab run [SCENARIO.yaml] FILE.fwsc [--out DIR] [--flash puya|uc25|HEX] [--resources FILE@0xADDR | entry:TYPE@0xADDR] [--usb-play IN.wav] [--strict] [--html OUT]\n       fm1-lab play [DIR | FILE.fwsc] [IN.wav | --mic | --audio-in NAME] [--midi NAME] [--fresh]\n       fm1-lab map [SCENARIO.yaml] FILE.fwsc [--ms N] [--flash HEX] [--json OUT]\n       fm1-lab boot FILE.fwsc [--ms N] [--jedec HEX] [--keys SCRIPT] [--png OUT]\n       fm1-lab brick-test FILE.fwsc... [--ms N] [--json OUT] [--png-dir DIR]\n       fm1-lab profile [SCENARIO.yaml] FILE.fwsc [--syms FILE] [--clocks 180,120,...] [--json OUT] [--html OUT]\n       fm1-lab compare [SCENARIO.yaml] A.fwsc B.fwsc [--out DIR] [--strict] [--headroom] [--identical] [--no-retry] [--html OUT]"); process.exit(64); };
+const usage = () => { console.error("usage: fm1-lab setup [--check] [--force] [emu|toolchain|sdk|python ...]\n       fm1-lab build DIR [--profile P] [--release X] [--cmd '...'] [--root DIR] [--out DIR] [--json OUT] [--run]\n       fm1-lab new NAME [--dir PARENT] [--id NN] [--author NAME] [--git-name N --git-email E] [--gh-credential] [--lib PATH]... [--no-build]\n       fm1-lab test [DIR] [--emu] [SCRIPT...]\n       fm1-lab watch [DIR] [--scenario S] [--profile P] [--cmd '...'] [--no-test] [--no-flash] [--no-compare]\n       fm1-lab sweep PATH|@LIST... --out DIR [--brick] [--preview | --gif --m4a] [--tours MAP.json] [--jobs N] [--no-audio] [--force]\n       fm1-lab inspect FILE.fwsc...\n       fm1-lab run [SCENARIO.yaml] FILE.fwsc [--out DIR] [--flash puya|uc25|HEX] [--resources FILE@0xADDR | entry:TYPE@0xADDR] [--usb-play SONG.wav|mp3|flac...] [--strict] [--html OUT]\n       fm1-lab play [DIR | FILE.fwsc] [SONG.wav|mp3|flac|m4a | --mic | --audio-in NAME] [--midi NAME] [--fresh]\n       fm1-lab map [SCENARIO.yaml] FILE.fwsc [--ms N] [--flash HEX] [--json OUT]\n       fm1-lab boot FILE.fwsc [--ms N] [--jedec HEX] [--keys SCRIPT] [--png OUT]\n       fm1-lab brick-test FILE.fwsc... [--ms N] [--json OUT] [--png-dir DIR]\n       fm1-lab profile [SCENARIO.yaml] FILE.fwsc [--syms FILE] [--clocks 180,120,...] [--json OUT] [--html OUT]\n       fm1-lab compare [SCENARIO.yaml] A.fwsc B.fwsc [--out DIR] [--strict] [--headroom] [--identical] [--no-retry] [--html OUT]"); process.exit(64); };
 const flag = (name) => { const i = argv.indexOf(name); if (i < 0) return false; argv.splice(i, 1); return true; };
 // before a firmware runs: is it a well-formed FM-1 package? (FM-1 Inspect's decoder)
 const preflight = (...files) => {
@@ -177,7 +178,7 @@ if (cmd === "setup") {
 } else if (cmd === "play") {
   // the firmware in the emulator's window, with audio coming in over USB if asked for (lib/play.mjs)
   const audioIn = opt("--audio-in"), midi = opt("--midi"), mic = flag("--mic"), fresh = flag("--fresh");
-  const wav = argv.find((a) => /\.wav$/i.test(a)), target = argv.find((a) => a !== wav) || ".";
+  const wav = argv.find((a) => AUDIO_EXT.test(a)), target = argv.find((a) => a !== wav) || ".";
   let c;
   try { c = playCommand({ target, wav, mic, audioIn, midi, fresh }); } catch (e) { console.error(`fm1-lab play: ${e.message}`); process.exit(2); }
   console.log(`PLAY   ${c.name} in the emulator's window${c.say.length ? "" : " (its own sound; give a WAV, --mic or --audio-in NAME for audio in)"}`);

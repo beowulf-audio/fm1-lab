@@ -107,13 +107,14 @@ link), and its `tests/run.sh` into `fm1lab.json`'s `tests`.
 
 ### play
 
-    fm1-lab play [DIR | FILE.fwsc] [IN.wav | --mic | --audio-in NAME] [--midi NAME|none] [--fresh]
+    fm1-lab play [DIR | FILE.fwsc] [SONG.wav|mp3|flac|m4a... | --mic | --audio-in NAME] [--midi NAME|none] [--fresh]
 
 The firmware in the emulator's window, to play by hand: the panel on screen, the sound out of your speakers, your
 computer keyboard (`A W S E D F…` the keys, `A` = C4; `1`-`0`, `Space`, `R`, `Z`, `X` the buttons; the arrows SELECT and
 ALGORITHM) and the mouse for the controls, and your MIDI inputs. DIR is a project (its built package; default the
 current directory). With audio in, the computer plays into the firmware's USB audio output as a Mac or a phone would
-(patch 0002): a WAV looped, your microphone (`--mic`; macOS asks once for the terminal's microphone permission), or any
+(patch 0002): an audio file looped (WAV as it is; MP3, FLAC, M4A, AIFF... converted once with macOS's afconvert,
+or ffmpeg, into `.work/audio/`), your microphone (`--mic`; macOS asks once for the terminal's microphone permission), or any
 input whose name has NAME (`--audio-in BlackHole`: a loopback device plays any app into it). What the firmware saves
 is kept between plays (`.work/play/`), unless `--fresh`. The window runs outside the sandbox (it needs the screen and
 the audio devices); the firmware itself only runs inside the emulator.

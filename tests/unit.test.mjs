@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import { spawnSync } from "node:child_process";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { normalize, toKeys, loadScenario } from "../lib/scenario.mjs";
@@ -325,5 +325,26 @@ test("play: a project's package in the window, with a WAV, the microphone or an 
       assert.throws(() => playCommand({ target: d, mic: true, audioIn: "BlackHole" }), /one audio input/);
       assert.throws(() => playCommand({ target: join(d, "in.wav") }), /not a .fwsc/);
     } finally { if (dir === undefined) delete process.env.FM1_LAB_EMU; else process.env.FM1_LAB_EMU = dir; }
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+test("audio files: a WAV as it is, an MP3 / FLAC / M4A converted once to a WAV", { skip: process.platform === "darwin" ? false : "afconvert is macOS's" }, async () => {
+  const { audioToWav, AUDIO_EXT } = await import("../lib/audiofile.mjs");
+  const d = mkdtempSync(join(tmpdir(), "fm1-lab-audio-"));
+  try {
+    const wav = join(d, "in.wav"), n = 44100, b = Buffer.alloc(44 + 4 * n);
+    b.write("RIFF", 0); b.writeUInt32LE(36 + 4 * n, 4); b.write("WAVEfmt ", 8); b.writeUInt32LE(16, 16); b.writeUInt16LE(1, 20); b.writeUInt16LE(2, 22);
+    b.writeUInt32LE(44100, 24); b.writeUInt32LE(176400, 28); b.writeUInt16LE(4, 32); b.writeUInt16LE(16, 34); b.write("data", 36); b.writeUInt32LE(4 * n, 40);
+    for (let i = 0; i < n; i++) { const v = Math.round(8000 * Math.sin(i / 10)); b.writeInt16LE(v, 44 + 4 * i); b.writeInt16LE(v, 46 + 4 * i); }
+    writeFileSync(wav, b);
+    assert.equal(audioToWav(wav), wav, "a WAV: as it is");
+    const flac = join(d, "in.flac");
+    assert.equal(spawnSync("afconvert", ["-f", "flac", "-d", "flac", wav, flac]).status, 0);
+    const out = audioToWav(flac);
+    assert.match(out, /\.work\/audio\/in-[0-9a-f]{16}\.wav$/);
+    assert.equal(readFileSync(out).toString("latin1", 8, 12), "WAVE");
+    assert.equal(audioToWav(flac), out, "the second time: the same, cached");
+    assert.ok(AUDIO_EXT.test("x.mp3") && AUDIO_EXT.test("x.FLAC") && !AUDIO_EXT.test("x.fwsc"));
+    assert.throws(() => audioToWav(join(d, "none.mp3")), /no such file/);
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
