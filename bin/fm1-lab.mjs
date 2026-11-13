@@ -181,7 +181,7 @@ if (cmd === "setup") {
   const wav = argv.find((a) => AUDIO_EXT.test(a)), target = argv.find((a) => a !== wav) || ".";
   let c;
   try { c = playCommand({ target, wav, mic, audioIn, midi, fresh }); } catch (e) { console.error(`fm1-lab play: ${e.message}`); process.exit(2); }
-  console.log(`PLAY   ${c.name} in the emulator's window${c.say.length ? "" : " (its own sound; give a WAV, --mic or --audio-in NAME for audio in)"}`);
+  console.log(`PLAY   ${c.name} in the emulator's window${wav || mic || audioIn ? "" : " (its own sound; give a WAV, --mic or --audio-in NAME for audio in)"}`);
   for (const l of c.say) console.log(`  ${l}`);
   console.log("  the keys: A W S E D F ... play the keys (A = C4), 1-0 and Space, R, Z, X the buttons, arrows SELECT and ALGORITHM; the mouse for the rest");
   process.exitCode = await playFirmware({ target, wav, mic, audioIn, midi, fresh });

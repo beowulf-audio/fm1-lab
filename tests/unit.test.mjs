@@ -319,6 +319,12 @@ test("play: a project's package in the window, with a WAV, the microphone or an 
       let c = playCommand({ target: d, wav: join(d, "in.wav") });
       assert.equal(c.env.FM1_USB_PLAY, join(d, "in.wav"));
       assert.ok(c.args.includes("--usb") && c.args.includes("--flash"), "the cable, and a flash kept between plays");
+      const f1 = c.args[c.args.indexOf("--flash") + 1];
+      assert.equal(playCommand({ target: d }).args.includes(f1), true, "the same build: the same flash");
+      writeFileSync(join(d, "app", "build", "x.fwsc"), "a new build");
+      const f2 = playCommand({ target: d }).args.find((a) => a.endsWith(".flash"));
+      assert.notEqual(f2, f1, "a new build: its own flash (the old one holds the old firmware's code)");
+      writeFileSync(join(d, "app", "build", "x.fwsc"), "");
       c = playCommand({ target: d, mic: true, fresh: true });
       assert.deepEqual(c.args.slice(-2), ["--audio-in", "default"]);
       assert.ok(!c.args.includes("--flash"), "--fresh: a fresh flash");
